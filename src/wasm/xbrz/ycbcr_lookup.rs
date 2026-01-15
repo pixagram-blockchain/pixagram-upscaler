@@ -8,21 +8,23 @@ fn u8_as_i8(v: u8) -> i8 {
     v as i8
 }
 
-pub(crate) enum YCbCrLookup {
-    IDiff555(Box<[u32]>),
-    // IDiff888(Box<[u32]>), // Large LUT disabled for WASM compactness
+/// Reinterpret i8 bits as u8
+#[inline(always)]
+fn i8_as_u8(v: i8) -> u8 {
+    v as u8
 }
 
-// Fixed point scale factor for distance calculations (8 bits of precision)
-const SCALE_SHIFT: u32 = 8;
-const SCALE: f64 = (1 << SCALE_SHIFT) as f64;
+pub(crate) enum YCbCrLookup {
+    IDiff555(Box<[f32]>),
+    IDiff888(Box<[f32]>),
+}
 
 // SAFETY: Only written to once by the closure in instance(), which is mediated by a parking_lot::Once.
 static mut LOOKUP_INSTANCE: Option<YCbCrLookup> = None;
 static LOOKUP_LOCK: Once = Once::new();
 
 #[inline]
-fn dist_ycbcr(r_diff: i16, g_diff: i16, b_diff: i16) -> u32 {
+fn dist_ycbcr(r_diff: i16, g_diff: i16, b_diff: i16) -> f64 {
     let r_diff = r_diff as f64;
     let g_diff = g_diff as f64;
     let b_diff = b_diff as f64;
@@ -39,10 +41,7 @@ fn dist_ycbcr(r_diff: i16, g_diff: i16, b_diff: i16) -> u32 {
     let c_b = SCALE_B * (b_diff - y);
     let c_r = SCALE_R * (r_diff - y);
 
-    let dist = (y * y + c_b * c_b + c_r * c_r).sqrt();
-    
-    // Store as fixed point u32
-    (dist * SCALE + 0.5) as u32
+    (y * y + c_b * c_b + c_r * c_r).sqrt()
 }
 
 impl YCbCrLookup {
@@ -56,8 +55,14 @@ impl YCbCrLookup {
     #[inline]
     pub(crate) fn initialise() {
         LOOKUP_LOCK.call_once(|| unsafe {
-            // Defaulting to small LUT for WASM
-            LOOKUP_INSTANCE = Some(Self::new_small());
+            #[cfg(feature = "large_lut")]
+            {
+                LOOKUP_INSTANCE = Some(Self::new_large());
+            }
+            #[cfg(not(feature = "large_lut"))]
+            {
+                LOOKUP_INSTANCE = Some(Self::new_small());
+            }
         });
     }
 
@@ -78,54 +83,101 @@ impl YCbCrLookup {
             let g_diff = u8_as_i8((((i >> 5) & 0x1F) << 3) as u8) as i16 * 2;
             let b_diff = u8_as_i8(((i & 0x1F) << 3) as u8) as i16 * 2;
 
-            lookup.push(dist_ycbcr(r_diff, g_diff, b_diff));
+            lookup.push(dist_ycbcr(r_diff, g_diff, b_diff) as f32);
         }
 
         Self::IDiff555(lookup.into_boxed_slice())
     }
 
-    #[inline(always)]
-    pub(crate) fn dist_rgb(&self, rgb1: [u8; 3], rgb2: [u8; 3]) -> u32 {
+    pub(crate) fn new_large() -> Self {
+        let mut lookup = Vec::with_capacity(0x100_0000);
+
+        for i in 0..0x100_0000 {
+            let r_diff = u8_as_i8(((i >> 16) & 0xFF) as u8) as i16 * 2;
+            let g_diff = u8_as_i8(((i >> 8) & 0xFF) as u8) as i16 * 2;
+            let b_diff = u8_as_i8((i & 0xFF) as u8) as i16 * 2;
+
+            lookup.push(dist_ycbcr(r_diff, g_diff, b_diff) as f32);
+        }
+
+        Self::IDiff888(lookup.into_boxed_slice())
+    }
+
+    #[inline]
+    pub(crate) fn dist_rgb(&self, rgb1: [u8; 3], rgb2: [u8; 3]) -> f32 {
         let [r1, g1, b1] = rgb1;
         let [r2, g2, b2] = rgb2;
-        
-        // Correct casting: (diff / 2) -> i8 -> u8 (bitwise reinterpretation)
-        let r_part = (((r1 as i16) - (r2 as i16)) / 2) as i8 as u8;
-        let g_part = (((g1 as i16) - (g2 as i16)) / 2) as i8 as u8;
-        let b_part = (((b1 as i16) - (b2 as i16)) / 2) as i8 as u8;
+        let r_part: u8 = i8_as_u8((((r1 as i16) - (r2 as i16)) / 2) as i8);
+        let g_part: u8 = i8_as_u8((((g1 as i16) - (g2 as i16)) / 2) as i8);
+        let b_part: u8 = i8_as_u8((((b1 as i16) - (b2 as i16)) / 2) as i8);
 
         match self {
             YCbCrLookup::IDiff555(lookup) => {
-                unsafe {
-                    *lookup.get_unchecked(
-                        (((r_part as usize) >> 3) << 10)
-                        | (((g_part as usize) >> 3) << 5)
-                        | ((b_part as usize) >> 3)
-                    )
+                lookup[(((r_part as usize) >> 3) << 10)
+                    | (((g_part as usize) >> 3) << 5)
+                    | ((b_part as usize) >> 3)]
+            }
+            YCbCrLookup::IDiff888(lookup) => {
+                lookup[((r_part as usize) << 16) | ((g_part as usize) << 8) | (b_part as usize)]
+            }
+        }
+    }
+
+    pub(crate) fn dist<P: Pixel>(&self, pix1: P, pix2: P) -> f32 {
+        let a1 = pix1.alpha() as f32 / u8::MAX as f32;
+        let a2 = pix2.alpha() as f32 / u8::MAX as f32;
+
+        let d = self.dist_rgb(pix1.to_rgb(), pix2.to_rgb());
+        if a1 < a2 {
+            a1 * d + 255.0 * (a2 - a1)
+        } else {
+            a2 * d + 255.0 * (a1 - a2)
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::super::pixel::Rgb8;
+    use super::{dist_ycbcr, YCbCrLookup};
+
+    fn test_lut(lut: &YCbCrLookup, rgb1: (u8, u8, u8), rgb2: (u8, u8, u8)) {
+        let (r1, g1, b1) = rgb1;
+        let (r2, g2, b2) = rgb2;
+        let r_diff = (r1 as i16) - (r2 as i16);
+        let g_diff = (g1 as i16) - (g2 as i16);
+        let b_diff = (b1 as i16) - (b2 as i16);
+
+        let dist = dist_ycbcr(r_diff, g_diff, b_diff) as f32;
+        let lut_dist = lut.dist(Rgb8::from_parts(r1, g1, b1), Rgb8::from_parts(r2, g2, b2));
+        assert_eq!(dist, lut_dist)
+    }
+
+    fn test_whole_lut(lut: &YCbCrLookup) {
+        for r1 in (0..=0xFF).step_by(16) {
+            for g1 in (0..=0xFF).step_by(16) {
+                for b1 in (0..=0xFF).step_by(16) {
+                    for r2 in (0..=0xFF).step_by(16) {
+                        for g2 in (0..=0xFF).step_by(16) {
+                            for b2 in (0..=0xFF).step_by(16) {
+                                test_lut(lut, (r1, g1, b1), (r2, g2, b2))
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    #[inline(always)]
-    pub(crate) fn dist<P: Pixel>(&self, pix1: P, pix2: P) -> u32 {
-        let a1 = pix1.alpha();
-        let a2 = pix2.alpha();
+    #[test]
+    fn test_large_lut() {
+        let lookup = YCbCrLookup::new_large();
+        test_whole_lut(&lookup);
+    }
 
-        if a1 == 255 && a2 == 255 {
-            return self.dist_rgb(pix1.to_rgb(), pix2.to_rgb());
-        }
-
-        let d = self.dist_rgb(pix1.to_rgb(), pix2.to_rgb());
-        
-        let (a_min, a_diff) = if a1 < a2 {
-            (a1 as u32, (a2 - a1) as u32)
-        } else {
-            (a2 as u32, (a1 - a2) as u32)
-        };
-
-        // (d * a_min) / 255 + (a_diff * 255 * 256)
-        // We use >> 8 approx for / 255, and 65280 for 255 * 256
-        ((d * a_min) >> 8) + (a_diff * 65280)
+    #[test]
+    fn test_small_lut() {
+        let lookup = YCbCrLookup::new_small();
+        test_whole_lut(&lookup);
     }
 }

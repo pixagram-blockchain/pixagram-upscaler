@@ -6,21 +6,57 @@ use super::oob_reader::OobReader;
 use super::pixel::Pixel;
 use super::ycbcr_lookup::YCbCrLookup;
 
-/// 4x4 kernel with logical positions
+/// 4x4 kernel with logical positions:
+/// ```text
+/// -----------------
+/// | A | B | C | D |
+/// -----------------
+/// | E | F | G | H |
+/// -----------------
+/// | I | J | K | L |
+/// -----------------
+/// | M | N | O | P |
+/// -----------------
+/// ```
+/// F is the center pixel.
 #[repr(C)]
 #[derive(Default)]
 pub(crate) struct Kernel4x4<P: Pixel> {
-    pub(crate) a: P, pub(crate) b: P, pub(crate) c: P, pub(crate) d: P,
-    pub(crate) e: P, pub(crate) f: P, pub(crate) g: P, pub(crate) h: P,
-    pub(crate) i: P, pub(crate) j: P, pub(crate) k: P, pub(crate) l: P,
-    pub(crate) m: P, pub(crate) n: P, pub(crate) o: P, pub(crate) p: P,
+    pub(crate) a: P,
+    pub(crate) b: P,
+    pub(crate) c: P,
+
+    pub(crate) e: P,
+    pub(crate) f: P,
+    pub(crate) g: P,
+
+    pub(crate) i: P,
+    pub(crate) j: P,
+    pub(crate) k: P,
+
+    pub(crate) m: P,
+    pub(crate) n: P,
+    pub(crate) o: P,
+
+    pub(crate) d: P,
+    pub(crate) h: P,
+    pub(crate) l: P,
+    pub(crate) p: P,
 }
 
 #[repr(C)]
 struct Kernel3x3<P: Pixel> {
-    pub(crate) a: P, pub(crate) b: P, pub(crate) c: P,
-    pub(crate) d: P, pub(crate) e: P, pub(crate) f: P,
-    pub(crate) g: P, pub(crate) h: P, pub(crate) i: P,
+    pub(crate) a: P,
+    pub(crate) b: P,
+    pub(crate) c: P,
+
+    pub(crate) d: P,
+    pub(crate) e: P,
+    pub(crate) f: P,
+
+    pub(crate) g: P,
+    pub(crate) h: P,
+    pub(crate) i: P,
 }
 
 impl<P: Pixel> Kernel4x4<P> {
@@ -29,23 +65,45 @@ impl<P: Pixel> Kernel4x4<P> {
         let mut kernel = Self::default();
 
         oob.fill_dhlp(&mut kernel, -4);
-        kernel.a = kernel.d; kernel.e = kernel.h; kernel.i = kernel.l; kernel.m = kernel.p;
+        kernel.a = kernel.d;
+        kernel.e = kernel.h;
+        kernel.i = kernel.l;
+        kernel.m = kernel.p;
 
         oob.fill_dhlp(&mut kernel, -3);
-        kernel.b = kernel.d; kernel.f = kernel.h; kernel.j = kernel.l; kernel.n = kernel.p;
+        kernel.b = kernel.d;
+        kernel.f = kernel.h;
+        kernel.j = kernel.l;
+        kernel.n = kernel.p;
 
         oob.fill_dhlp(&mut kernel, -2);
-        kernel.c = kernel.d; kernel.g = kernel.h; kernel.k = kernel.l; kernel.o = kernel.p;
+        kernel.c = kernel.d;
+        kernel.g = kernel.h;
+        kernel.k = kernel.l;
+        kernel.o = kernel.p;
 
         oob.fill_dhlp(&mut kernel, -1);
+
         kernel
     }
 
     #[inline]
     pub(crate) fn next_column<'src>(&mut self, oob: &impl OobReader<'src, P>, x: isize) {
-        self.a = self.b; self.e = self.f; self.i = self.j; self.m = self.n;
-        self.b = self.c; self.f = self.g; self.j = self.k; self.n = self.o;
-        self.c = self.d; self.g = self.h; self.k = self.l; self.o = self.p;
+        self.a = self.b;
+        self.e = self.f;
+        self.i = self.j;
+        self.m = self.n;
+
+        self.b = self.c;
+        self.f = self.g;
+        self.j = self.k;
+        self.n = self.o;
+
+        self.c = self.d;
+        self.g = self.h;
+        self.k = self.l;
+        self.o = self.p;
+
         oob.fill_dhlp(self, x);
     }
 
@@ -71,12 +129,8 @@ impl<P: Pixel> Kernel4x4<P> {
         let c_bias = cfg.center_direction_bias as f32;
         let dir_thresh = cfg.dominant_direction_threshold as f32;
 
-        // FIX: Cast u32 distances to f32 for multiplication with float bias
-        let jg = (dist!(i, f) + dist!(f, c) + dist!(n, k) + dist!(k, h)) as f32 
-                 + c_bias * (dist!(j, g) as f32);
-        
-        let fk = (dist!(e, j) + dist!(j, o) + dist!(b, g) + dist!(g, l)) as f32 
-                 + c_bias * (dist!(f, k) as f32);
+        let jg = dist!(i, f) + dist!(f, c) + dist!(n, k) + dist!(k, h) + c_bias * dist!(j, g);
+        let fk = dist!(e, j) + dist!(j, o) + dist!(b, g) + dist!(g, l) + c_bias * dist!(f, k);
 
         if jg < fk {
             let blend_mode = if dir_thresh * jg < fk {
@@ -139,6 +193,17 @@ impl Rotation {
         matches!(self, Rotation::None)
     }
 
+    /*
+    #[inline]
+    pub(crate) const fn rotate_cw(self) -> Self {
+        match self {
+            Rotation::None => Rotation::Clockwise90,
+            Rotation::Clockwise90 => Rotation::Clockwise180,
+            Rotation::Clockwise180 => Rotation::Clockwise270,
+            Rotation::Clockwise270 => Rotation::None,
+        }
+    }*/
+
     #[inline]
     pub(crate) const fn rotate_ccw(self) -> Self {
         match self {
@@ -176,6 +241,7 @@ impl<'ker, P: Pixel, const R: u8> RotKernel3x3<'ker, P, R> {
         Self(kernel.as_3x3())
     }
 
+    /*impl_getter!(a, g, i, c);*/
     impl_getter!(b, d, h, f);
     impl_getter!(c, a, g, i);
     impl_getter!(d, h, f, b);

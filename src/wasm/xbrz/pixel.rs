@@ -107,6 +107,9 @@ impl From<RGB555> for Rgb8 {
 
 impl From<Argb8> for Rgb8 {
     fn from(value: Argb8) -> Self {
+        // SAFETY: The internal representation of RGB888 and ARGB8888 are compatible
+        // as they use the same memory layout. Note that the "A" value exists in a "don't care"
+        // portion of the RGB888 backing array.
         unsafe { mem::transmute(value) }
     }
 }
@@ -125,15 +128,7 @@ impl Pixel for Rgb8 {
     }
 
     fn gradient<const M: usize, const N: usize>(front: Self, back: Self) -> Self {
-        // Optimized fast path: Rgb8 is always opaque.
-        let [fr, fg, fb] = front.to_rgb();
-        let [br, bg, bb] = back.to_rgb();
-
-        Self::from_parts(
-            ((fr as usize * M + br as usize * (N - M)) / N) as u8,
-            ((fg as usize * M + bg as usize * (N - M)) / N) as u8,
-            ((fb as usize * M + bb as usize * (N - M)) / N) as u8,
-        )
+        todo!()
     }
 }
 
@@ -146,24 +141,8 @@ impl Argb8 {
 fn gradient_rgba<P: Pixel, const M: usize, const N: usize>(front: P, back: P) -> P {
     debug_assert!(0 < M && M < N && N <= 1000);
 
-    let fa = front.alpha();
-    let ba = back.alpha();
-
-    // OPTIMIZATION: Fast path for opaque pixels.
-    if fa == 255 && ba == 255 {
-        let [fr, fg, fb] = front.to_rgb();
-        let [br, bg, bb] = back.to_rgb();
-
-        return P::from_rgba([
-            ((fr as usize * M + br as usize * (N - M)) / N) as u8,
-            ((fg as usize * M + bg as usize * (N - M)) / N) as u8,
-            ((fb as usize * M + bb as usize * (N - M)) / N) as u8,
-            255,
-        ]);
-    }
-
-    let weight_front = fa as usize * M;
-    let weight_back = ba as usize * (N - M);
+    let weight_front = front.alpha() as usize * M;
+    let weight_back = back.alpha() as usize * (N - M);
     let weight_sum = weight_front + weight_back;
 
     if weight_sum == 0 {

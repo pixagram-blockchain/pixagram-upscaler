@@ -1,6 +1,6 @@
 {
   "name": "@pixagram/upscaler",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "High-performance pixel art rendering engines with WebGL2 GPU acceleration and WASM support",
   "keywords": [
     "pixel-art",
@@ -18,7 +18,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/pixagram-blockchain/pixagram-upscaler"
   },
   "type": "module",
   "main": "./dist/index.js",

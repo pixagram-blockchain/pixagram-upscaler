@@ -8,14 +8,6 @@ use super::oob_reader::OobReader;
 use super::pixel::Pixel;
 use super::ycbcr_lookup::YCbCrLookup;
 
-// Internal configuration using integers to avoid repetitive float conversions/checks
-struct ScalerConfigInt {
-    equal_color_tolerance: u32,
-    dominant_direction_threshold: f32,
-    steep_direction_threshold: f32,
-    center_direction_bias: f32,
-}
-
 fn alpha_grad<P: Pixel, const M: usize, const N: usize>(pix_back: &mut P, pix_front: P) {
     *pix_back = P::gradient::<M, N>(pix_front, *pix_back);
 }
@@ -50,7 +42,7 @@ pub(crate) trait Scaler<const SCALE: usize> {
         destination: &mut [P],
         dest_width: usize,
         blend_info: Blend2x2,
-        config: &ScalerConfigInt,
+        config: &ScalerConfig,
     ) {
         // SAFETY: should be initialised by scale_image()
         debug_assert!(YCbCrLookup::instance_is_initialised());
@@ -66,15 +58,14 @@ pub(crate) trait Scaler<const SCALE: usize> {
                 ycbcr.dist(kernel.$x(), kernel.$y())
             };
         }
-        // Integer comparisons
         macro_rules! eq {
             ($x:ident, $y:ident) => {
-                dist!($x, $y) < config.equal_color_tolerance
+                dist!($x, $y) < config.equal_color_tolerance as f32
             };
         }
         macro_rules! neq {
             ($x:ident, $y:ident) => {
-                dist!($x, $y) >= config.equal_color_tolerance
+                dist!($x, $y) >= config.equal_color_tolerance as f32
             };
         }
 
@@ -112,15 +103,11 @@ pub(crate) trait Scaler<const SCALE: usize> {
         if do_line_blend {
             let fg = dist!(f, g);
             let hc = dist!(h, c);
-            
-            // Cast to float only here for ratio check
-            let fg_f = fg as f32;
-            let hc_f = hc as f32;
 
             let shallow_line =
-                config.steep_direction_threshold * fg_f <= hc_f && neq!(e, g) && neq!(d, g);
+                config.steep_direction_threshold as f32 * fg <= hc && neq!(e, g) && neq!(d, g);
             let steep_line =
-                config.steep_direction_threshold * hc_f <= fg_f && neq!(e, c) && neq!(b, c);
+                config.steep_direction_threshold as f32 * hc <= fg && neq!(e, c) && neq!(b, c);
 
             match (shallow_line, steep_line) {
                 (true, true) => Self::blend_line_steep_and_shallow(px, &mut out),
@@ -147,15 +134,6 @@ pub(crate) trait Scaler<const SCALE: usize> {
         assert!(src_width > 0);
         assert!(src_height > 0);
         YCbCrLookup::initialise();
-        
-        // Pre-calculate integer/fixed-point config
-        // Assuming YCbCrLookup uses scale 256.0
-        let int_config = ScalerConfigInt {
-            equal_color_tolerance: (config.equal_color_tolerance * 256.0) as u32,
-            dominant_direction_threshold: config.dominant_direction_threshold as f32,
-            steep_direction_threshold: config.steep_direction_threshold as f32,
-            center_direction_bias: config.center_direction_bias as f32,
-        };
 
         let dest_width = src_width * SCALE;
         let dest_height = src_height * SCALE;
@@ -248,10 +226,10 @@ pub(crate) trait Scaler<const SCALE: usize> {
                     let rot_180 = RotKernel3x3::<P, { Rotation::Clockwise180 as u8 }>::new(&kernel);
                     let rot_270 = RotKernel3x3::<P, { Rotation::Clockwise270 as u8 }>::new(&kernel);
 
-                    Self::blend_pixel(rot_0, out, dest_width, blend_xy, &int_config);
-                    Self::blend_pixel(rot_90, out, dest_width, blend_xy, &int_config);
-                    Self::blend_pixel(rot_180, out, dest_width, blend_xy, &int_config);
-                    Self::blend_pixel(rot_270, out, dest_width, blend_xy, &int_config);
+                    Self::blend_pixel(rot_0, out, dest_width, blend_xy, config);
+                    Self::blend_pixel(rot_90, out, dest_width, blend_xy, config);
+                    Self::blend_pixel(rot_180, out, dest_width, blend_xy, config);
+                    Self::blend_pixel(rot_270, out, dest_width, blend_xy, config);
                 }
             }
         }

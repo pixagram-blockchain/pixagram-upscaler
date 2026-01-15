@@ -1,4 +1,10 @@
 //! A high quality image upscaling algorithm designed to preserve key details in low-resolution pixel art.
+//!
+//! The original version was implemented by C++ by [Zenju](https://sourceforge.net/u/zenju/profile/)
+//! and can be found on [SourceForge](https://sourceforge.net/projects/xbrz/).
+//!
+//! This project is a direct port of xBRZ version 1.8 into Rust.
+//!
 use std::mem;
 
 use self::config::ScalerConfig;
@@ -6,8 +12,7 @@ use self::oob_reader::OobReaderTransparent;
 use self::pixel::{Pixel, Rgba8};
 use self::scaler::{Scaler, Scaler2x, Scaler3x, Scaler4x, Scaler5x, Scaler6x};
 
-// Fixed: Removed unused import
-// pub use self::config::ScalerConfig as XbrzScalerConfig;
+pub use self::config::ScalerConfig as XbrzScalerConfig;
 
 mod blend;
 pub mod config;
@@ -19,6 +24,20 @@ mod scaler;
 mod ycbcr_lookup;
 
 /// Use the xBRZ algorithm to scale up an image by an integer factor.
+///
+/// The `source` is specified as a flat array of pixels, ordered in left to right, then top to bottom order.
+/// The subpixels are arranged in RGBA order and each channel is 8 bits, such that each pixel takes up 4 bytes.
+///
+/// A newly allocated image is returned as a flat RGBA vector, with image dimensions
+/// `src_width * factor` by `src_height * factor` and total byte length
+/// `src_width * factor * src_height * factor * 4`.
+///
+/// The `factor` may be one of 1, 2, 3, 4, 5 or 6.
+///
+/// # Panics
+///
+/// Panics if the `source` slice length is not exactly equal to `src_width * src_height * 4`,
+/// or if `factor` is not one of 1, 2, 3, 4, 5 or 6.
 pub fn scale_rgba(source: &[u8], src_width: usize, src_height: usize, factor: usize) -> Vec<u8> {
     scale::<Rgba8>(source, src_width, src_height, factor)
 }
@@ -121,6 +140,24 @@ fn scale_with_config<P: Pixel>(
     }
 }
 
+// ============================================================================
+// Public API for lib.rs
+// ============================================================================
+
+/// Core xBRZ upscaling function with configurable parameters
+/// 
+/// # Arguments
+/// * `input` - Source image as RGBA bytes
+/// * `src_w` - Source image width
+/// * `src_h` - Source image height  
+/// * `scale` - Scale factor (1-6)
+/// * `equal_color_tolerance` - Tolerance for considering colors equal (default: 30.0)
+/// * `center_direction_bias` - Bias for center direction (default: 4.0)
+/// * `dominant_direction_threshold` - Threshold for dominant direction (default: 3.6)
+/// * `steep_direction_threshold` - Threshold for steep direction (default: 2.2)
+/// 
+/// # Returns
+/// Scaled image as RGBA bytes
 pub fn xbrz_upscale(
     input: &[u8],
     src_w: usize,
