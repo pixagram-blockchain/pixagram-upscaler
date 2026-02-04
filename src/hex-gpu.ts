@@ -1,11 +1,28 @@
 /**
  * Hexagonal GPU Renderer using WebGL2
- * Optimized with Shared Context Management and Smart Resizing
+ * Uses shared GPU context for optimal resource usage
  */
 
 import type { HexOptions, HexOrientation, ImageInput, ImageOutput, Renderer } from './types.js';
+import {
+  acquireContext,
+  releaseContext,
+  isContextReady,
+  getContext,
+  registerProgram,
+  hasProgram,
+  getProgram,
+  ensureCanvasSize,
+  setViewport,
+  createTexture,
+  deleteTexture,
+  readPixels,
+  draw,
+  clear,
+} from './gpu-context.js';
 
-// Vertex shader
+const PROGRAM_ID = 'hex';
+
 const VERTEX_SHADER = `#version 300 es
 layout(location = 0) in vec2 position;
 out vec2 vUv;
@@ -15,7 +32,6 @@ void main() {
     gl_Position = vec4(position, 0.0, 1.0);
 }`;
 
-// Fragment shader
 const FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 
@@ -117,25 +133,53 @@ void main() {
     outColor = texture(uTex, texCoord);
 }`;
 
-function parseColor(color: string | number | undefined, defaultColor: [number, number, number, number]): [number, number, number, number] {
+const UNIFORMS = [
+  'uTex', 'uOutputRes', 'uInputRes', 'uScale', 'uOrientation',
+  'uDrawBorders', 'uBorderColor', 'uBorderThickness', 'uBackgroundColor'
+];
+
+function parseColor(
+  color: string | number | undefined,
+  defaultColor: [number, number, number, number]
+): [number, number, number, number] {
   if (color === undefined) return defaultColor;
   if (typeof color === 'number') {
-    return [((color >> 24) & 0xFF) / 255, ((color >> 16) & 0xFF) / 255, ((color >> 8) & 0xFF) / 255, (color & 0xFF) / 255];
+    return [
+      ((color >> 24) & 0xFF) / 255,
+      ((color >> 16) & 0xFF) / 255,
+      ((color >> 8) & 0xFF) / 255,
+      (color & 0xFF) / 255
+    ];
   }
   if (color === 'transparent') return [0, 0, 0, 0];
   if (color.startsWith('#')) {
     const hex = color.slice(1);
     if (hex.length === 6) {
-      return [parseInt(hex.slice(0, 2), 16) / 255, parseInt(hex.slice(2, 4), 16) / 255, parseInt(hex.slice(4, 6), 16) / 255, 1];
+      return [
+        parseInt(hex.slice(0, 2), 16) / 255,
+        parseInt(hex.slice(2, 4), 16) / 255,
+        parseInt(hex.slice(4, 6), 16) / 255,
+        1
+      ];
     }
     if (hex.length === 8) {
-      return [parseInt(hex.slice(0, 2), 16) / 255, parseInt(hex.slice(2, 4), 16) / 255, parseInt(hex.slice(4, 6), 16) / 255, parseInt(hex.slice(6, 8), 16) / 255];
+      return [
+        parseInt(hex.slice(0, 2), 16) / 255,
+        parseInt(hex.slice(2, 4), 16) / 255,
+        parseInt(hex.slice(4, 6), 16) / 255,
+        parseInt(hex.slice(6, 8), 16) / 255
+      ];
     }
   }
   return defaultColor;
 }
 
-export function hexGetDimensions(srcWidth: number, srcHeight: number, scale: number, orientation: HexOrientation = 'flat-top'): { width: number; height: number } {
+export function hexGetDimensions(
+  srcWidth: number,
+  srcHeight: number,
+  scale: number,
+  orientation: HexOrientation = 'flat-top'
+): { width: number; height: number } {
   const SQRT3 = 1.732050808;
   if (orientation === 'flat-top') {
     const hSpacing = scale * 1.5;
@@ -158,19 +202,11 @@ export function hexGetDimensions(srcWidth: number, srcHeight: number, scale: num
   }
 }
 
-interface HexResources {
-  gl: WebGL2RenderingContext;
-  canvas: OffscreenCanvas;
-  program: WebGLProgram;
-  texture: WebGLTexture;
-  uniforms: Record<string, WebGLUniformLocation | null>;
-  capacity: { width: number; height: number };
-  refCount: number;
-}
-
+/** Hex GPU Renderer */
 export class HexGpuRenderer implements Renderer<HexOptions> {
-  private static resources: HexResources | null = null;
   private initialized = false;
+  private texture: WebGLTexture | null = null;
+  private textureSize = { width: 0, height: 0 };
 
   static create(): HexGpuRenderer {
     const renderer = new HexGpuRenderer();
@@ -181,90 +217,26 @@ export class HexGpuRenderer implements Renderer<HexOptions> {
   private init(): void {
     if (this.initialized) return;
 
-    if (!HexGpuRenderer.resources) {
-        if (typeof OffscreenCanvas === 'undefined') throw new Error('OffscreenCanvas not supported');
+    acquireContext();
 
-        const canvas = new OffscreenCanvas(1, 1);
-        const gl = canvas.getContext('webgl2', {
-            alpha: true,
-            premultipliedAlpha: false,
-            desynchronized: true,
-            powerPreference: 'high-performance',
-            antialias: false,
-        });
-        if (!gl) throw new Error('WebGL2 not supported');
-
-        const vs = this.createShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
-        const fs = this.createShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
-        const program = gl.createProgram()!;
-        gl.attachShader(program, vs);
-        gl.attachShader(program, fs);
-        gl.linkProgram(program);
-        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error('Shader link failed: ' + gl.getProgramInfoLog(program));
-
-        gl.useProgram(program);
-        gl.deleteShader(vs);
-        gl.deleteShader(fs);
-
-        const uniforms = {
-            uTex: gl.getUniformLocation(program, 'uTex'),
-            uOutputRes: gl.getUniformLocation(program, 'uOutputRes'),
-            uInputRes: gl.getUniformLocation(program, 'uInputRes'),
-            uScale: gl.getUniformLocation(program, 'uScale'),
-            uOrientation: gl.getUniformLocation(program, 'uOrientation'),
-            uDrawBorders: gl.getUniformLocation(program, 'uDrawBorders'),
-            uBorderColor: gl.getUniformLocation(program, 'uBorderColor'),
-            uBorderThickness: gl.getUniformLocation(program, 'uBorderThickness'),
-            uBackgroundColor: gl.getUniformLocation(program, 'uBackgroundColor'),
-        };
-        
-        gl.uniform1i(uniforms.uTex, 0);
-        
-        const buf = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-        gl.enableVertexAttribArray(0);
-        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-
-        const texture = gl.createTexture()!;
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-        HexGpuRenderer.resources = {
-            gl, canvas, program, texture, uniforms,
-            capacity: { width: 0, height: 0 },
-            refCount: 0
-        };
+    if (!hasProgram(PROGRAM_ID)) {
+      registerProgram(PROGRAM_ID, VERTEX_SHADER, FRAGMENT_SHADER, UNIFORMS);
     }
 
-    HexGpuRenderer.resources.refCount++;
+    // Hex uses NEAREST filtering
+    this.texture = createTexture('nearest');
     this.initialized = true;
   }
 
-  private createShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
-    const shader = gl.createShader(type)!;
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      const info = gl.getShaderInfoLog(shader);
-      gl.deleteShader(shader);
-      throw new Error('Shader compile failed: ' + info);
-    }
-    return shader;
-  }
-
   isReady(): boolean {
-    return this.initialized && !!HexGpuRenderer.resources && !HexGpuRenderer.resources.gl.isContextLost();
+    return this.initialized && isContextReady();
   }
 
   render(input: ImageInput | ImageData, options: HexOptions = {}): ImageOutput {
-    if (!this.initialized || !HexGpuRenderer.resources) throw new Error('Renderer not initialized');
-    
-    const { gl, canvas, uniforms, texture, capacity } = HexGpuRenderer.resources;
-    if (gl.isContextLost()) throw new Error('WebGL context lost');
+    if (!this.initialized || !this.texture) throw new Error('Renderer not initialized');
+
+    const { gl } = getContext();
+    const { program, uniforms } = getProgram(PROGRAM_ID);
 
     const data = input instanceof ImageData ? input.data : input.data;
     const width = input.width;
@@ -274,50 +246,54 @@ export class HexGpuRenderer implements Renderer<HexOptions> {
     const orientation: HexOrientation = options.orientation ?? 'flat-top';
     const { width: outWidth, height: outHeight } = hexGetDimensions(width, height, scale, orientation);
 
-    gl.useProgram(HexGpuRenderer.resources.program);
+    gl.useProgram(program);
 
-    // Smart Resize
-    if (outWidth > capacity.width || outHeight > capacity.height) {
-        canvas.width = Math.max(capacity.width, outWidth);
-        canvas.height = Math.max(capacity.height, outHeight);
-        HexGpuRenderer.resources.capacity = { width: canvas.width, height: canvas.height };
-    }
-    gl.viewport(0, 0, outWidth, outHeight);
+    ensureCanvasSize(outWidth, outHeight);
+    setViewport(outWidth, outHeight);
 
-    gl.uniform2f(uniforms.uOutputRes, outWidth, outHeight);
-    gl.uniform2f(uniforms.uInputRes, width, height);
-    gl.uniform1f(uniforms.uScale, scale);
-    gl.uniform1i(uniforms.uOrientation, orientation === 'flat-top' ? 0 : 1);
-    gl.uniform1i(uniforms.uDrawBorders, options.drawBorders ? 1 : 0);
-    gl.uniform1f(uniforms.uBorderThickness, options.borderThickness ?? 1);
+    // Set uniforms
+    gl.uniform1i(uniforms.get('uTex')!, 0);
+    gl.uniform2f(uniforms.get('uOutputRes')!, outWidth, outHeight);
+    gl.uniform2f(uniforms.get('uInputRes')!, width, height);
+    gl.uniform1f(uniforms.get('uScale')!, scale);
+    gl.uniform1i(uniforms.get('uOrientation')!, orientation === 'flat-top' ? 0 : 1);
+    gl.uniform1i(uniforms.get('uDrawBorders')!, options.drawBorders ? 1 : 0);
+    gl.uniform1f(uniforms.get('uBorderThickness')!, options.borderThickness ?? 1);
 
     const borderColor = parseColor(options.borderColor, [0.16, 0.16, 0.16, 1]);
-    gl.uniform4f(uniforms.uBorderColor, ...borderColor);
+    gl.uniform4f(uniforms.get('uBorderColor')!, ...borderColor);
+    
     const bgColor = parseColor(options.backgroundColor, [0, 0, 0, 0]);
-    gl.uniform4f(uniforms.uBackgroundColor, ...bgColor);
+    gl.uniform4f(uniforms.get('uBackgroundColor')!, ...bgColor);
 
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    // Upload texture
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    if (this.textureSize.width !== width || this.textureSize.height !== height) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+      this.textureSize = { width, height };
+    } else {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    }
 
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    clear();
+    draw();
 
-    const pixels = new Uint8ClampedArray(outWidth * outHeight * 4);
-    gl.readPixels(0, 0, outWidth, outHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-
-    return { data: pixels, width: outWidth, height: outHeight };
+    return {
+      data: readPixels(outWidth, outHeight),
+      width: outWidth,
+      height: outHeight,
+    };
   }
 
   dispose(): void {
-    if (this.initialized && HexGpuRenderer.resources) {
-        HexGpuRenderer.resources.refCount--;
-        if (HexGpuRenderer.resources.refCount <= 0) {
-            const { gl, texture, program } = HexGpuRenderer.resources;
-            gl.deleteTexture(texture);
-            gl.deleteProgram(program);
-            HexGpuRenderer.resources = null;
-        }
-        this.initialized = false;
+    if (this.initialized) {
+      if (this.texture) {
+        deleteTexture(this.texture);
+        this.texture = null;
+      }
+      this.textureSize = { width: 0, height: 0 };
+      releaseContext();
+      this.initialized = false;
     }
   }
 }

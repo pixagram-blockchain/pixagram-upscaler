@@ -1,11 +1,27 @@
 /**
  * CRT GPU Renderer using WebGL2
- * * Optimized with Shared Context Management and Smart Resizing
+ * Uses shared GPU context for optimal resource usage
  */
 
 import type { CrtOptions, ImageInput, ImageOutput, Renderer } from './types.js';
+import {
+  acquireContext,
+  releaseContext,
+  isContextReady,
+  getContext,
+  registerProgram,
+  hasProgram,
+  getProgram,
+  ensureCanvasSize,
+  setViewport,
+  createTexture,
+  deleteTexture,
+  readPixels,
+  draw,
+} from './gpu-context.js';
 
-// Vertex shader
+const PROGRAM_ID = 'crt';
+
 const VERTEX_SHADER = `#version 300 es
 layout(location = 0) in vec2 position;
 out vec2 vUv;
@@ -15,7 +31,6 @@ void main() {
     gl_Position = vec4(position, 0.0, 1.0);
 }`;
 
-// Fragment shader
 const FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 
@@ -95,23 +110,16 @@ void main() {
     outColor = vec4(toSrgb(finalRGB), texSample.a);
 }`;
 
-/** Shared resources interface */
-interface CrtResources {
-  gl: WebGL2RenderingContext;
-  canvas: OffscreenCanvas;
-  program: WebGLProgram;
-  texture: WebGLTexture;
-  uniforms: Record<string, WebGLUniformLocation | null>;
-  capacity: { width: number; height: number }; // Current max dimensions
-  refCount: number;
-}
+const UNIFORMS = [
+  'uTex', 'uRes', 'uWarp', 'uScanHardness', 'uScanOpacity',
+  'uMaskOpacity', 'uEnableWarp', 'uEnableScanlines', 'uEnableMask'
+];
 
 /** CRT GPU Renderer */
 export class CrtGpuRenderer implements Renderer<CrtOptions> {
-  // Static shared resources to prevent context limits
-  private static resources: CrtResources | null = null;
-  
   private initialized = false;
+  private texture: WebGLTexture | null = null;
+  private textureSize = { width: 0, height: 0 };
 
   static create(): CrtGpuRenderer {
     const renderer = new CrtGpuRenderer();
@@ -122,101 +130,27 @@ export class CrtGpuRenderer implements Renderer<CrtOptions> {
   private init(): void {
     if (this.initialized) return;
 
-    // Initialize shared resources if they don't exist
-    if (!CrtGpuRenderer.resources) {
-      if (typeof OffscreenCanvas === 'undefined') {
-        throw new Error('OffscreenCanvas not supported');
-      }
-
-      const canvas = new OffscreenCanvas(256, 256); // Start small
-      const gl = canvas.getContext('webgl2', {
-        alpha: true,
-        premultipliedAlpha: false,
-        desynchronized: true,
-        powerPreference: 'high-performance',
-        antialias: false,
-      });
-
-      if (!gl) throw new Error('WebGL2 not supported');
-
-      const vs = this.createShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
-      const fs = this.createShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
-
-      const program = gl.createProgram()!;
-      gl.attachShader(program, vs);
-      gl.attachShader(program, fs);
-      gl.linkProgram(program);
-
-      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-        throw new Error('Shader program link failed: ' + gl.getProgramInfoLog(program));
-      }
-
-      gl.useProgram(program);
-      gl.deleteShader(vs); // Clean up shaders after link
-      gl.deleteShader(fs);
-
-      const uniforms = {
-        uTex: gl.getUniformLocation(program, 'uTex'),
-        uRes: gl.getUniformLocation(program, 'uRes'),
-        uWarp: gl.getUniformLocation(program, 'uWarp'),
-        uScanHardness: gl.getUniformLocation(program, 'uScanHardness'),
-        uScanOpacity: gl.getUniformLocation(program, 'uScanOpacity'),
-        uMaskOpacity: gl.getUniformLocation(program, 'uMaskOpacity'),
-        uEnableWarp: gl.getUniformLocation(program, 'uEnableWarp'),
-        uEnableScanlines: gl.getUniformLocation(program, 'uEnableScanlines'),
-        uEnableMask: gl.getUniformLocation(program, 'uEnableMask'),
-      };
-
-      const buf = gl.createBuffer();
-      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
-      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-      gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-
-      const texture = gl.createTexture()!;
-      gl.bindTexture(gl.TEXTURE_2D, texture);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-      CrtGpuRenderer.resources = {
-        gl,
-        canvas,
-        program,
-        texture,
-        uniforms,
-        capacity: { width: 0, height: 0 },
-        refCount: 0
-      };
+    acquireContext();
+    
+    // Register program if not already registered
+    if (!hasProgram(PROGRAM_ID)) {
+      registerProgram(PROGRAM_ID, VERTEX_SHADER, FRAGMENT_SHADER, UNIFORMS);
     }
 
-    CrtGpuRenderer.resources.refCount++;
+    // Create dedicated texture (CRT uses LINEAR filtering)
+    this.texture = createTexture('linear');
     this.initialized = true;
   }
 
-  private createShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
-    const shader = gl.createShader(type)!;
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      const info = gl.getShaderInfoLog(shader);
-      gl.deleteShader(shader);
-      throw new Error('Shader compile failed: ' + info);
-    }
-    return shader;
-  }
-
   isReady(): boolean {
-    return this.initialized && CrtGpuRenderer.resources !== null && !CrtGpuRenderer.resources.gl.isContextLost();
+    return this.initialized && isContextReady();
   }
 
   render(input: ImageInput | ImageData, options: CrtOptions = {}): ImageOutput {
-    if (!this.initialized || !CrtGpuRenderer.resources) throw new Error('Renderer not initialized');
+    if (!this.initialized || !this.texture) throw new Error('Renderer not initialized');
 
-    const { gl, canvas, uniforms, texture, capacity } = CrtGpuRenderer.resources;
-    
-    if (gl.isContextLost()) throw new Error('WebGL context lost');
+    const { gl } = getContext();
+    const { program, uniforms } = getProgram(PROGRAM_ID);
 
     const data = input instanceof ImageData ? input.data : input.data;
     const width = input.width;
@@ -226,65 +160,49 @@ export class CrtGpuRenderer implements Renderer<CrtOptions> {
     const outWidth = width * scale;
     const outHeight = height * scale;
 
-    gl.useProgram(CrtGpuRenderer.resources.program);
+    gl.useProgram(program);
 
-    // 1. Smart Resize: Only grow canvas if output is larger than current capacity
-    if (outWidth > capacity.width || outHeight > capacity.height) {
-        canvas.width = Math.max(capacity.width, outWidth);
-        canvas.height = Math.max(capacity.height, outHeight);
-        CrtGpuRenderer.resources.capacity = { width: canvas.width, height: canvas.height };
+    // Ensure canvas is large enough
+    ensureCanvasSize(outWidth, outHeight);
+    setViewport(outWidth, outHeight);
+
+    // Upload texture
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    if (this.textureSize.width !== width || this.textureSize.height !== height) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+      this.textureSize = { width, height };
+    } else {
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, data);
     }
-    
-    // Always update viewport to the actual desired output size (might be smaller than canvas)
-    gl.viewport(0, 0, outWidth, outHeight);
 
-    // 2. Texture Upload: Use texSubImage2D if texture capacity allows, otherwise reallocate
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    // Since we reuse the texture for varying input sizes, we check input dimensions vs texture capacity.
-    // However, input size usually matches texture logic. For simplicity in this shared model,
-    // we just reallocate if the input size changes, which is common in single-renderer flow.
-    // Optimization: If width/height matches previous render, use SubImage.
-    
-    // Note: We don't track texture capacity separately from canvas capacity in this simplifiction,
-    // but typically input images are smaller. We'll simply reallocate texture storage if dimensions change.
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    // Set uniforms
+    gl.uniform1i(uniforms.get('uTex')!, 0);
+    gl.uniform2f(uniforms.get('uRes')!, outWidth, outHeight);
+    gl.uniform2f(uniforms.get('uWarp')!, options.warpX ?? 0.015, options.warpY ?? 0.02);
+    gl.uniform1f(uniforms.get('uScanHardness')!, options.scanHardness ?? -4.0);
+    gl.uniform1f(uniforms.get('uScanOpacity')!, options.scanOpacity ?? 0.5);
+    gl.uniform1f(uniforms.get('uMaskOpacity')!, options.maskOpacity ?? 0.3);
+    gl.uniform1i(uniforms.get('uEnableWarp')!, options.enableWarp !== false ? 1 : 0);
+    gl.uniform1i(uniforms.get('uEnableScanlines')!, options.enableScanlines !== false ? 1 : 0);
+    gl.uniform1i(uniforms.get('uEnableMask')!, options.enableMask !== false ? 1 : 0);
 
-    // Update Uniforms
-    gl.uniform2f(uniforms.uRes, outWidth, outHeight);
-    gl.uniform2f(uniforms.uWarp, options.warpX ?? 0.015, options.warpY ?? 0.02);
-    gl.uniform1f(uniforms.uScanHardness, options.scanHardness ?? -4.0);
-    gl.uniform1f(uniforms.uScanOpacity, options.scanOpacity ?? 0.5);
-    gl.uniform1f(uniforms.uMaskOpacity, options.maskOpacity ?? 0.3);
-    gl.uniform1i(uniforms.uEnableWarp, options.enableWarp !== false ? 1 : 0);
-    gl.uniform1i(uniforms.uEnableScanlines, options.enableScanlines !== false ? 1 : 0);
-    gl.uniform1i(uniforms.uEnableMask, options.enableMask !== false ? 1 : 0);
-
-    gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-    // Read pixels from the viewport area only
-    const pixels = new Uint8ClampedArray(outWidth * outHeight * 4);
-    gl.readPixels(0, 0, outWidth, outHeight, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+    draw();
 
     return {
-      data: pixels,
+      data: readPixels(outWidth, outHeight),
       width: outWidth,
       height: outHeight,
     };
   }
 
   dispose(): void {
-    if (this.initialized && CrtGpuRenderer.resources) {
-      CrtGpuRenderer.resources.refCount--;
-      
-      // Only destroy WebGL context if no one else is using it
-      if (CrtGpuRenderer.resources.refCount <= 0) {
-        const { gl, texture, program } = CrtGpuRenderer.resources;
-        gl.deleteTexture(texture);
-        gl.deleteProgram(program);
-        // Extensions/Buffers are auto-cleaned by context loss usually, 
-        // but strict cleanup helps.
-        CrtGpuRenderer.resources = null;
+    if (this.initialized) {
+      if (this.texture) {
+        deleteTexture(this.texture);
+        this.texture = null;
       }
+      this.textureSize = { width: 0, height: 0 };
+      releaseContext();
       this.initialized = false;
     }
   }
@@ -296,4 +214,3 @@ export const CRT_PRESETS: Record<string, Partial<CrtOptions>> = {
   subtle: { warpX: 0.008, warpY: 0.01, scanHardness: -3.0, scanOpacity: 0.3, maskOpacity: 0.15 },
   flat: { warpX: 0, warpY: 0, enableWarp: false, scanHardness: -4.0, scanOpacity: 0.5, maskOpacity: 0.3 },
 };
-
