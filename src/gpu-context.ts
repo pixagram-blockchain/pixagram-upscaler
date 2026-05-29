@@ -1,8 +1,10 @@
 /**
  * Shared GPU Context Manager
- * 
+ *
  * Provides a single WebGL2 context shared across all GPU renderers.
  * This prevents hitting browser WebGL context limits and reduces memory usage.
+ *
+ * Works on the main thread or inside a Web Worker (uses OffscreenCanvas).
  */
 
 export interface ProgramInfo {
@@ -14,6 +16,11 @@ export interface SharedGpuContext {
   gl: WebGL2RenderingContext;
   canvas: OffscreenCanvas;
   capacity: { width: number; height: number };
+  /** Reusable PIXEL_PACK_BUFFER for asynchronous readback */
+  packBuffer: WebGLBuffer | null;
+  packBufferSize: number;
+  /** Currently bound program, used to skip redundant gl.useProgram calls */
+  lastProgram: WebGLProgram | null;
 }
 
 /** Singleton shared GPU context */
@@ -44,9 +51,15 @@ export function acquireContext(): SharedGpuContext {
       desynchronized: true,
       powerPreference: 'high-performance',
       antialias: false,
+      // We read pixels back ourselves; the drawing buffer never needs preserving.
+      preserveDrawingBuffer: false,
     });
 
     if (!gl) throw new Error('WebGL2 not supported');
+
+    // Tightly packed RGBA rows (no 4-byte row padding surprises on odd widths).
+    gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
     // Setup shared vertex buffer (fullscreen triangle - same for all renderers)
     const buf = gl.createBuffer();
@@ -61,6 +74,9 @@ export function acquireContext(): SharedGpuContext {
       gl,
       canvas,
       capacity: { width: 0, height: 0 },
+      packBuffer: null,
+      packBufferSize: 0,
+      lastProgram: null,
     };
   }
 
@@ -79,7 +95,7 @@ export function releaseContext(): void {
 
   if (contextRefCount <= 0 && sharedContext) {
     const { gl } = sharedContext;
-    
+
     // Clean up all registered programs
     for (const { program } of programs.values()) {
       gl.deleteProgram(program);
@@ -91,6 +107,11 @@ export function releaseContext(): void {
       gl.deleteTexture(sharedTexture);
       sharedTexture = null;
       sharedTextureSize = { width: 0, height: 0 };
+    }
+
+    // Clean up readback buffer
+    if (sharedContext.packBuffer) {
+      gl.deleteBuffer(sharedContext.packBuffer);
     }
 
     sharedContext = null;
@@ -127,16 +148,16 @@ export function compileShader(
 ): WebGLShader {
   const shader = gl.createShader(type);
   if (!shader) throw new Error('Failed to create shader');
-  
+
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
-  
+
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
     const info = gl.getShaderInfoLog(shader);
     gl.deleteShader(shader);
     throw new Error('Shader compile failed: ' + info);
   }
-  
+
   return shader;
 }
 
@@ -211,7 +232,26 @@ export function unregisterProgram(id: string): void {
   if (info && sharedContext) {
     sharedContext.gl.deleteProgram(info.program);
     programs.delete(id);
+    if (sharedContext.lastProgram === info.program) {
+      sharedContext.lastProgram = null;
+    }
   }
+}
+
+/**
+ * Bind a program, skipping the GL call when it is already current.
+ * Returns true if a state change actually occurred.
+ *
+ * This both removes redundant driver calls when the same renderer runs
+ * repeatedly (e.g. video frames) and guarantees the correct program is
+ * bound when several renderers share the context.
+ */
+export function useProgram(program: WebGLProgram): boolean {
+  const ctx = getContext();
+  if (ctx.lastProgram === program) return false;
+  ctx.gl.useProgram(program);
+  ctx.lastProgram = program;
+  return true;
 }
 
 /**
@@ -248,7 +288,7 @@ export function getSharedTexture(): WebGLTexture {
     const { gl } = getContext();
     sharedTexture = gl.createTexture();
     if (!sharedTexture) throw new Error('Failed to create texture');
-    
+
     gl.bindTexture(gl.TEXTURE_2D, sharedTexture);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
@@ -269,9 +309,9 @@ export function uploadToSharedTexture(
 ): void {
   const { gl } = getContext();
   const texture = getSharedTexture();
-  
+
   gl.bindTexture(gl.TEXTURE_2D, texture);
-  
+
   // Set filter mode
   const filterMode = filter === 'linear' ? gl.LINEAR : gl.NEAREST;
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filterMode);
@@ -316,13 +356,97 @@ export function deleteTexture(texture: WebGLTexture): void {
 }
 
 /**
- * Read pixels from the current framebuffer
+ * Read pixels from the current framebuffer synchronously.
+ *
+ * NOTE: this forces a full GPU -> CPU pipeline flush and stalls the calling
+ * thread until rendering completes. Prefer {@link readPixelsAsync} where a
+ * Promise-based result is acceptable (e.g. inside a worker).
  */
-export function readPixels(width: number, height: number): Uint8ClampedArray {
+export function readPixels(
+  width: number,
+  height: number,
+  out?: Uint8ClampedArray
+): Uint8ClampedArray {
   const { gl } = getContext();
-  const pixels = new Uint8ClampedArray(width * height * 4);
+  const size = width * height * 4;
+  const pixels = out && out.length >= size ? out : new Uint8ClampedArray(size);
   gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-  return pixels;
+  return pixels.length === size ? pixels : pixels.subarray(0, size);
+}
+
+/**
+ * Poll a fence sync without blocking the event loop.
+ */
+function clientWaitAsync(
+  gl: WebGL2RenderingContext,
+  sync: WebGLSync,
+  intervalMs = 0
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const check = () => {
+      const status = gl.clientWaitSync(sync, 0, 0);
+      if (status === gl.WAIT_FAILED) {
+        reject(new Error('clientWaitSync failed'));
+        return;
+      }
+      if (status === gl.TIMEOUT_EXPIRED) {
+        setTimeout(check, intervalMs);
+        return;
+      }
+      resolve();
+    };
+    check();
+  });
+}
+
+/**
+ * Read pixels from the current framebuffer asynchronously via a
+ * PIXEL_PACK_BUFFER + fence sync. This avoids the hard CPU/GPU stall of the
+ * synchronous path: the GPU keeps working while we await the fence, and the
+ * calling thread is never blocked.
+ *
+ * The internal pack buffer is reused across calls (grow-only).
+ */
+export async function readPixelsAsync(
+  width: number,
+  height: number,
+  out?: Uint8ClampedArray
+): Promise<Uint8ClampedArray> {
+  const ctx = getContext();
+  const { gl } = ctx;
+  const size = width * height * 4;
+
+  if (!ctx.packBuffer) {
+    ctx.packBuffer = gl.createBuffer();
+    if (!ctx.packBuffer) throw new Error('Failed to create pack buffer');
+  }
+
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, ctx.packBuffer);
+  if (ctx.packBufferSize < size) {
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, size, gl.STREAM_READ);
+    ctx.packBufferSize = size;
+  }
+
+  // Kick off the readback into the PBO (returns immediately).
+  gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, 0);
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+
+  const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+  if (!sync) throw new Error('Failed to create fence sync');
+  gl.flush();
+
+  try {
+    await clientWaitAsync(gl, sync);
+  } finally {
+    gl.deleteSync(sync);
+  }
+
+  const pixels = out && out.length >= size ? out : new Uint8ClampedArray(size);
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, ctx.packBuffer);
+  gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, pixels, 0, size);
+  gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+
+  return pixels.length === size ? pixels : pixels.subarray(0, size);
 }
 
 /**

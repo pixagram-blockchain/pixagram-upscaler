@@ -1,6 +1,6 @@
 {
   "name": "@pixagram/upscaler",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "High-performance pixel art rendering engines with WebGL2 GPU acceleration and WASM support",
   "keywords": [
     "pixel-art",
@@ -41,6 +41,14 @@
       "import": "./dist/xbrz-gpu.js",
       "types": "./dist/xbrz-gpu.d.ts"
     },
+    "./worker": {
+      "import": "./dist/worker-client.js",
+      "types": "./dist/worker-client.d.ts"
+    },
+    "./render-worker": {
+      "import": "./dist/render-worker.js",
+      "types": "./dist/render-worker.d.ts"
+    },
     "./wasm": {
       "import": "./dist/wasm/renderart.js",
       "types": "./dist/wasm/renderart.d.ts"
@@ -56,6 +64,8 @@
     "build:ts": "tsc",
     "build:wasm": "wasm-pack build --target web --out-dir dist/wasm && npm run build:wasm:cleanup",
     "build:wasm:cleanup": "rm -f dist/wasm/.gitignore dist/wasm/package.json",
+    "build:threads": "npm run build:wasm:threads && npm run build:ts",
+    "build:wasm:threads": "RUSTFLAGS=\"-C target-feature=+atomics,+bulk-memory,+mutable-globals\" rustup run nightly wasm-pack build --target web --out-dir dist/wasm -- --features parallel -Z build-std=panic_abort,std && npm run build:wasm:cleanup",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build",
     "test": "node --test dist/**/*.test.js"

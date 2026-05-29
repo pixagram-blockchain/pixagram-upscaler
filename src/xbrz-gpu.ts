@@ -1,7 +1,7 @@
 /**
  * xBRZ GPU Renderer using WebGL2
  * Uses shared GPU context for optimal resource usage
- * 
+ *
  * High-performance xBRZ pixel art scaling using fragment shaders.
  * Based on Hyllian's xBRZ algorithm with RGBA alpha support.
  */
@@ -15,11 +15,13 @@ import {
   registerProgram,
   hasProgram,
   getProgram,
+  useProgram,
   ensureCanvasSize,
   setViewport,
   createTexture,
   deleteTexture,
   readPixels,
+  readPixelsAsync,
   draw,
   clear,
 } from './gpu-context.js';
@@ -57,7 +59,6 @@ export class XbrzGpuRenderer implements Renderer<XbrzOptions> {
   private initialized = false;
   private texture: WebGLTexture | null = null;
   private textureSize = { width: 0, height: 0 };
-  private currentScale = 0;
 
   static create(): XbrzGpuRenderer {
     const renderer = new XbrzGpuRenderer();
@@ -87,12 +88,16 @@ export class XbrzGpuRenderer implements Renderer<XbrzOptions> {
     return this.initialized && isContextReady();
   }
 
-  render(input: ImageInput | ImageData, options: XbrzOptions = {}): ImageOutput {
+  /**
+   * Submit the draw call. Shared by the sync and async readback paths.
+   * Returns the output dimensions.
+   */
+  private submit(input: ImageInput | ImageData, options: XbrzOptions): { outWidth: number; outHeight: number } {
     if (!this.initialized || !this.texture) throw new Error('Renderer not initialized');
 
     const { gl } = getContext();
 
-    const data = input instanceof ImageData ? input.data : input.data;
+    const data = input.data;
     const width = input.width;
     const height = input.height;
 
@@ -103,12 +108,9 @@ export class XbrzGpuRenderer implements Renderer<XbrzOptions> {
     const programId = `${PROGRAM_PREFIX}_${scale}x`;
     const { program, uniforms } = getProgram(programId);
 
-    // Only switch program if scale changed
-    if (this.currentScale !== scale) {
-      gl.useProgram(program);
-      gl.uniform1i(uniforms.get('uTex')!, 0);
-      this.currentScale = scale;
-    }
+    // Bind program (no-op when already current) and the sampler unit.
+    useProgram(program);
+    gl.uniform1i(uniforms.get('uTex')!, 0);
 
     ensureCanvasSize(outWidth, outHeight);
     setViewport(outWidth, outHeight);
@@ -132,11 +134,31 @@ export class XbrzGpuRenderer implements Renderer<XbrzOptions> {
     clear();
     draw();
 
+    return { outWidth, outHeight };
+  }
+
+  render(input: ImageInput | ImageData, options: XbrzOptions = {}): ImageOutput {
+    const { outWidth, outHeight } = this.submit(input, options);
     return {
       data: readPixels(outWidth, outHeight),
       width: outWidth,
       height: outHeight,
     };
+  }
+
+  /**
+   * Non-blocking variant: the GPU keeps working while we await readback.
+   * Ideal inside a Web Worker. An optional reusable buffer can be supplied
+   * to avoid per-call allocations.
+   */
+  async renderAsync(
+    input: ImageInput | ImageData,
+    options: XbrzOptions = {},
+    out?: Uint8ClampedArray
+  ): Promise<ImageOutput> {
+    const { outWidth, outHeight } = this.submit(input, options);
+    const data = await readPixelsAsync(outWidth, outHeight, out);
+    return { data, width: outWidth, height: outHeight };
   }
 
   dispose(): void {
@@ -146,7 +168,6 @@ export class XbrzGpuRenderer implements Renderer<XbrzOptions> {
         this.texture = null;
       }
       this.textureSize = { width: 0, height: 0 };
-      this.currentScale = 0;
       releaseContext();
       this.initialized = false;
     }

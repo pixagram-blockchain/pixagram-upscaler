@@ -12,11 +12,13 @@ import {
   registerProgram,
   hasProgram,
   getProgram,
+  useProgram,
   ensureCanvasSize,
   setViewport,
   createTexture,
   deleteTexture,
   readPixels,
+  readPixelsAsync,
   draw,
 } from './gpu-context.js';
 
@@ -131,7 +133,7 @@ export class CrtGpuRenderer implements Renderer<CrtOptions> {
     if (this.initialized) return;
 
     acquireContext();
-    
+
     // Register program if not already registered
     if (!hasProgram(PROGRAM_ID)) {
       registerProgram(PROGRAM_ID, VERTEX_SHADER, FRAGMENT_SHADER, UNIFORMS);
@@ -146,13 +148,14 @@ export class CrtGpuRenderer implements Renderer<CrtOptions> {
     return this.initialized && isContextReady();
   }
 
-  render(input: ImageInput | ImageData, options: CrtOptions = {}): ImageOutput {
+  /** Submit the draw call (shared by sync/async paths). Returns output size. */
+  private submit(input: ImageInput | ImageData, options: CrtOptions): { outWidth: number; outHeight: number } {
     if (!this.initialized || !this.texture) throw new Error('Renderer not initialized');
 
     const { gl } = getContext();
     const { program, uniforms } = getProgram(PROGRAM_ID);
 
-    const data = input instanceof ImageData ? input.data : input.data;
+    const data = input.data;
     const width = input.width;
     const height = input.height;
 
@@ -160,7 +163,7 @@ export class CrtGpuRenderer implements Renderer<CrtOptions> {
     const outWidth = width * scale;
     const outHeight = height * scale;
 
-    gl.useProgram(program);
+    useProgram(program);
 
     // Ensure canvas is large enough
     ensureCanvasSize(outWidth, outHeight);
@@ -188,11 +191,27 @@ export class CrtGpuRenderer implements Renderer<CrtOptions> {
 
     draw();
 
+    return { outWidth, outHeight };
+  }
+
+  render(input: ImageInput | ImageData, options: CrtOptions = {}): ImageOutput {
+    const { outWidth, outHeight } = this.submit(input, options);
     return {
       data: readPixels(outWidth, outHeight),
       width: outWidth,
       height: outHeight,
     };
+  }
+
+  /** Non-blocking variant using asynchronous PBO readback. */
+  async renderAsync(
+    input: ImageInput | ImageData,
+    options: CrtOptions = {},
+    out?: Uint8ClampedArray
+  ): Promise<ImageOutput> {
+    const { outWidth, outHeight } = this.submit(input, options);
+    const data = await readPixelsAsync(outWidth, outHeight, out);
+    return { data, width: outWidth, height: outHeight };
   }
 
   dispose(): void {

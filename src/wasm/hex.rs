@@ -191,7 +191,9 @@ pub fn hex_upscale(
     let scale = scale.clamp(2, 32) as u32;
     let geometry = HexGeometry::new(scale, config.orientation);
     let (out_w, out_h) = geometry.output_dimensions(src_w as u32, src_h as u32);
-    let mut output = vec![0u8; (out_w * out_h * 4) as usize];
+    let out_w = out_w as usize;
+    let out_h = out_h as usize;
+    let mut output = vec![0u8; out_w * out_h * 4];
 
     let bg = [
         ((config.background_color >> 24) & 0xFF) as u8,
@@ -213,27 +215,76 @@ pub fn hex_upscale(
     let src_w_i = src_w as i32;
     let src_h_i = src_h as i32;
 
-    for y in 0..out_h {
-        let y_f = y as f32;
-        for x in 0..out_w {
-            let x_f = x as f32;
-            
-            let (q, r) = geometry.pixel_to_hex_fractional(x_f, y_f);
-            let (hex_col, hex_row) = geometry.fractional_to_grid(q, r);
-            let out_idx = ((y * out_w + x) * 4) as usize;
+    // Each output row is independent. With the `parallel` feature rows are
+    // distributed across the rayon thread pool; otherwise they run serially.
+    // Both paths call the same `hex_render_row` kernel for identical output.
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+        output
+            .par_chunks_mut(out_w * 4)
+            .enumerate()
+            .for_each(|(y, row)| {
+                hex_render_row(
+                    row, y, out_w, &geometry, input, src_w, src_w_i, src_h_i,
+                    &bg, &border, check_borders, border_thickness_f,
+                );
+            });
+    }
 
-            if hex_col >= 0 && hex_row >= 0 && hex_col < src_w_i && hex_row < src_h_i {
-                if check_borders && geometry.is_in_border(q, r, border_thickness_f) {
-                    output[out_idx..out_idx+4].copy_from_slice(&border);
-                } else {
-                    let src_idx = (hex_row as usize * src_w + hex_col as usize) * 4;
-                    output[out_idx..out_idx+4].copy_from_slice(&input[src_idx..src_idx+4]);
-                }
-            } else {
-                output[out_idx..out_idx+4].copy_from_slice(&bg);
-            }
+    #[cfg(not(feature = "parallel"))]
+    {
+        for y in 0..out_h {
+            let row = &mut output[y * out_w * 4..(y + 1) * out_w * 4];
+            hex_render_row(
+                row, y, out_w, &geometry, input, src_w, src_w_i, src_h_i,
+                &bg, &border, check_borders, border_thickness_f,
+            );
         }
     }
 
     output
+}
+
+/// Renders a single output row (`row` has length `out_w * 4`) of the hex effect.
+///
+/// Shared per-row kernel for the serial and parallel code paths. The geometry
+/// and per-pixel decisions are identical to the original double loop; only the
+/// destination addressing changed from `(y*out_w + x)*4` to a row-relative
+/// `x*4`, so rayon can pass each invocation a disjoint mutable row slice.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn hex_render_row(
+    row: &mut [u8],
+    y: usize,
+    out_w: usize,
+    geometry: &HexGeometry,
+    input: &[u8],
+    src_w: usize,
+    src_w_i: i32,
+    src_h_i: i32,
+    bg: &[u8; 4],
+    border: &[u8; 4],
+    check_borders: bool,
+    border_thickness_f: f32,
+) {
+    let y_f = y as f32;
+    for x in 0..out_w {
+        let x_f = x as f32;
+
+        let (q, r) = geometry.pixel_to_hex_fractional(x_f, y_f);
+        let (hex_col, hex_row) = geometry.fractional_to_grid(q, r);
+        let out_idx = x * 4;
+
+        if hex_col >= 0 && hex_row >= 0 && hex_col < src_w_i && hex_row < src_h_i {
+            if check_borders && geometry.is_in_border(q, r, border_thickness_f) {
+                row[out_idx..out_idx + 4].copy_from_slice(border);
+            } else {
+                let src_idx = (hex_row as usize * src_w + hex_col as usize) * 4;
+                row[out_idx..out_idx + 4].copy_from_slice(&input[src_idx..src_idx + 4]);
+            }
+        } else {
+            row[out_idx..out_idx + 4].copy_from_slice(bg);
+        }
+    }
 }

@@ -11,6 +11,8 @@ use self::config::ScalerConfig;
 use self::oob_reader::OobReaderTransparent;
 use self::pixel::{Pixel, Rgba8};
 use self::scaler::{Scaler, Scaler2x, Scaler3x, Scaler4x, Scaler5x, Scaler6x};
+#[cfg(feature = "parallel")]
+use self::ycbcr_lookup::YCbCrLookup;
 
 pub use self::config::ScalerConfig as XbrzScalerConfig;
 
@@ -53,12 +55,17 @@ pub fn scale_rgba_config(
     scale_with_config::<Rgba8>(source, src_width, src_height, factor, config)
 }
 
-fn scale<P: Pixel>(source: &[u8], src_width: usize, src_height: usize, factor: usize) -> Vec<u8> {
+fn scale<P: Pixel + Send + Sync>(
+    source: &[u8],
+    src_width: usize,
+    src_height: usize,
+    factor: usize,
+) -> Vec<u8> {
     let config = ScalerConfig::default();
     scale_with_config::<P>(source, src_width, src_height, factor, &config)
 }
 
-fn scale_with_config<P: Pixel>(
+fn scale_with_config<P: Pixel + Send + Sync>(
     source: &[u8], 
     src_width: usize, 
     src_height: usize, 
@@ -83,47 +90,21 @@ fn scale_with_config<P: Pixel>(
     } else {
         let mut dst_argb = vec![P::default(); src_width * src_height * factor * factor];
         match factor {
-            0 => unreachable!(),
-            1 => unreachable!(),
-            2 => Scaler2x::scale_image::<P, OobReaderTransparent<P>>(
-                src_argb,
-                dst_argb.as_mut_slice(),
-                src_width,
-                src_height,
-                config,
-                0..src_height,
+            0 | 1 => unreachable!(),
+            2 => run_scaler::<P, Scaler2x, 2>(
+                src_argb, dst_argb.as_mut_slice(), src_width, src_height, config,
             ),
-            3 => Scaler3x::scale_image::<P, OobReaderTransparent<P>>(
-                src_argb,
-                dst_argb.as_mut_slice(),
-                src_width,
-                src_height,
-                config,
-                0..src_height,
+            3 => run_scaler::<P, Scaler3x, 3>(
+                src_argb, dst_argb.as_mut_slice(), src_width, src_height, config,
             ),
-            4 => Scaler4x::scale_image::<P, OobReaderTransparent<P>>(
-                src_argb,
-                dst_argb.as_mut_slice(),
-                src_width,
-                src_height,
-                config,
-                0..src_height,
+            4 => run_scaler::<P, Scaler4x, 4>(
+                src_argb, dst_argb.as_mut_slice(), src_width, src_height, config,
             ),
-            5 => Scaler5x::scale_image::<P, OobReaderTransparent<P>>(
-                src_argb,
-                dst_argb.as_mut_slice(),
-                src_width,
-                src_height,
-                config,
-                0..src_height,
+            5 => run_scaler::<P, Scaler5x, 5>(
+                src_argb, dst_argb.as_mut_slice(), src_width, src_height, config,
             ),
-            6 => Scaler6x::scale_image::<P, OobReaderTransparent<P>>(
-                src_argb,
-                dst_argb.as_mut_slice(),
-                src_width,
-                src_height,
-                config,
-                0..src_height,
+            6 => run_scaler::<P, Scaler6x, 6>(
+                src_argb, dst_argb.as_mut_slice(), src_width, src_height, config,
             ),
             7.. => unreachable!(),
         };
@@ -137,6 +118,67 @@ fn scale_with_config<P: Pixel>(
             dst_nodrop.len() * P::SIZE / U8_SIZE,
             dst_nodrop.capacity() * P::SIZE / U8_SIZE,
         )
+    }
+}
+
+// ============================================================================
+// Scaler dispatch (serial / parallel)
+// ============================================================================
+
+/// Runs the chosen scaler over the whole destination buffer.
+///
+/// With the `parallel` feature enabled the output is split into horizontal
+/// stripes that are processed across the rayon thread pool. Each stripe owns a
+/// disjoint `&mut` chunk of the destination (via `par_chunks_mut`), so the
+/// writes never alias and no locking is required on the hot path. The xBRZ
+/// preprocessing is intentionally recomputed per stripe (see `scale_image`) so
+/// that stripes are fully independent.
+///
+/// Without the feature it runs as a single stripe on the calling thread, which
+/// is byte-for-byte identical to the original single-threaded implementation.
+#[inline]
+fn run_scaler<P, S, const N: usize>(
+    src: &[P],
+    dst: &mut [P],
+    src_width: usize,
+    src_height: usize,
+    config: &ScalerConfig,
+) where
+    P: Pixel + Send + Sync,
+    S: Scaler<N>,
+{
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::prelude::*;
+
+        // Build the shared YCbCr lookup table once, on this thread, before any
+        // worker reads it through the unchecked accessor.
+        YCbCrLookup::initialise();
+
+        let dest_width = src_width * N;
+        let threads = rayon::current_num_threads().max(1);
+        let stripe_rows = ((src_height + threads - 1) / threads).max(1);
+        let chunk_len = dest_width * stripe_rows * N;
+
+        dst.par_chunks_mut(chunk_len)
+            .enumerate()
+            .for_each(|(i, chunk)| {
+                let y0 = i * stripe_rows;
+                let y1 = (y0 + stripe_rows).min(src_height);
+                if y0 >= y1 {
+                    return;
+                }
+                <S as Scaler<N>>::scale_image::<P, OobReaderTransparent<P>>(
+                    src, chunk, src_width, src_height, config, y0..y1,
+                );
+            });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        <S as Scaler<N>>::scale_image::<P, OobReaderTransparent<P>>(
+            src, dst, src_width, src_height, config, 0..src_height,
+        );
     }
 }
 

@@ -12,11 +12,13 @@ import {
   registerProgram,
   hasProgram,
   getProgram,
+  useProgram,
   ensureCanvasSize,
   setViewport,
   createTexture,
   deleteTexture,
   readPixels,
+  readPixelsAsync,
   draw,
   clear,
 } from './gpu-context.js';
@@ -32,6 +34,10 @@ void main() {
     gl_Position = vec4(position, 0.0, 1.0);
 }`;
 
+// Border detection uses an analytical hexagon edge-distance test (O(1)),
+// matching the WASM implementation, instead of an O(thickness^2) neighbour
+// sampling loop. Fractional axial coordinates are computed once and reused
+// for both the grid lookup and the border test.
 const FRAGMENT_SHADER = `#version 300 es
 precision highp float;
 
@@ -50,9 +56,9 @@ out vec4 outColor;
 
 const float SQRT3 = 1.732050808;
 
-vec2 hexRound(vec2 uv) {
-    float q = uv.x;
-    float r = uv.y;
+vec2 hexRound(vec2 axial) {
+    float q = axial.x;
+    float r = axial.y;
     float s = -q - r;
 
     float qi = round(q);
@@ -68,27 +74,34 @@ vec2 hexRound(vec2 uv) {
     } else if (r_diff > s_diff) {
         ri = -qi - si;
     }
-    
+
     return vec2(qi, ri);
 }
 
-vec2 pixelToHex(vec2 pos, float scale, int orientation) {
-    vec2 axial;
+// Fractional axial coordinates for a pixel (offset already subtracted).
+vec2 hexAxial(vec2 pos, float scale, int orientation) {
     if (orientation == 0) {
         float q = (2.0/3.0 * pos.x) / scale;
         float r = (-1.0/3.0 * pos.x + SQRT3/3.0 * pos.y) / scale;
-        axial = hexRound(vec2(q, r));
-        float col = axial.x;
-        float row = axial.y + (axial.x - mod(axial.x, 2.0)) / 2.0;
-        if (mod(axial.x, 2.0) != 0.0 && axial.x < 0.0) row -= 1.0;
-        return vec2(col, row);
+        return vec2(q, r);
     } else {
         float q = (SQRT3/3.0 * pos.x - 1.0/3.0 * pos.y) / scale;
         float r = (2.0/3.0 * pos.y) / scale;
-        axial = hexRound(vec2(q, r));
-        float col = axial.x + (axial.y - mod(axial.y, 2.0)) / 2.0;
-        float row = axial.y;
-        if (mod(axial.y, 2.0) != 0.0 && axial.y < 0.0) col -= 1.0;
+        return vec2(q, r);
+    }
+}
+
+// Rounded axial (cube) -> offset grid (col, row).
+vec2 gridFromRounded(vec2 a, int orientation) {
+    if (orientation == 0) {
+        float col = a.x;
+        float row = a.y + (a.x - mod(a.x, 2.0)) / 2.0;
+        if (mod(a.x, 2.0) != 0.0 && a.x < 0.0) row -= 1.0;
+        return vec2(col, row);
+    } else {
+        float col = a.x + (a.y - mod(a.y, 2.0)) / 2.0;
+        float row = a.y;
+        if (mod(a.y, 2.0) != 0.0 && a.y < 0.0) col -= 1.0;
         return vec2(col, row);
     }
 }
@@ -103,32 +116,27 @@ void main() {
     }
 
     vec2 adjustedPos = pixelPos - offset;
-    vec2 hexCoord = pixelToHex(adjustedPos, uScale, uOrientation);
-    
-    if (hexCoord.x < 0.0 || hexCoord.y < 0.0 || 
+    vec2 axial = hexAxial(adjustedPos, uScale, uOrientation);
+    vec2 rounded = hexRound(axial);
+    vec2 hexCoord = gridFromRounded(rounded, uOrientation);
+
+    if (hexCoord.x < 0.0 || hexCoord.y < 0.0 ||
         hexCoord.x >= uInputRes.x || hexCoord.y >= uInputRes.y) {
         outColor = uBackgroundColor;
         return;
     }
-    
+
     if (uDrawBorders == 1 && uBorderThickness > 0.0) {
-        float t = uBorderThickness;
-        bool isBorder = false;
-        
-        for (float dy = -t; dy <= t; dy += 1.0) {
-            for (float dx = -t; dx <= t; dx += 1.0) {
-                if (dx == 0.0 && dy == 0.0) continue;
-                if (isBorder) break;
-                vec2 neighborHex = pixelToHex(pixelPos + vec2(dx, dy) - offset, uScale, uOrientation);
-                if (neighborHex != hexCoord) isBorder = true;
-            }
-        }
-        if (isBorder) {
+        float s = -axial.x - axial.y;
+        float cs = -rounded.x - rounded.y;
+        float dist = max(max(abs(axial.x - rounded.x), abs(axial.y - rounded.y)), abs(s - cs));
+        float thresh = 0.5 - (uBorderThickness * 0.55 / uScale);
+        if (dist > thresh) {
             outColor = uBorderColor;
             return;
         }
     }
-    
+
     vec2 texCoord = (hexCoord + 0.5) / uInputRes;
     outColor = texture(uTex, texCoord);
 }`;
@@ -232,13 +240,14 @@ export class HexGpuRenderer implements Renderer<HexOptions> {
     return this.initialized && isContextReady();
   }
 
-  render(input: ImageInput | ImageData, options: HexOptions = {}): ImageOutput {
+  /** Submit the draw call (shared by sync/async paths). Returns output size. */
+  private submit(input: ImageInput | ImageData, options: HexOptions): { outWidth: number; outHeight: number } {
     if (!this.initialized || !this.texture) throw new Error('Renderer not initialized');
 
     const { gl } = getContext();
     const { program, uniforms } = getProgram(PROGRAM_ID);
 
-    const data = input instanceof ImageData ? input.data : input.data;
+    const data = input.data;
     const width = input.width;
     const height = input.height;
 
@@ -246,7 +255,7 @@ export class HexGpuRenderer implements Renderer<HexOptions> {
     const orientation: HexOrientation = options.orientation ?? 'flat-top';
     const { width: outWidth, height: outHeight } = hexGetDimensions(width, height, scale, orientation);
 
-    gl.useProgram(program);
+    useProgram(program);
 
     ensureCanvasSize(outWidth, outHeight);
     setViewport(outWidth, outHeight);
@@ -262,7 +271,7 @@ export class HexGpuRenderer implements Renderer<HexOptions> {
 
     const borderColor = parseColor(options.borderColor, [0.16, 0.16, 0.16, 1]);
     gl.uniform4f(uniforms.get('uBorderColor')!, ...borderColor);
-    
+
     const bgColor = parseColor(options.backgroundColor, [0, 0, 0, 0]);
     gl.uniform4f(uniforms.get('uBackgroundColor')!, ...bgColor);
 
@@ -278,11 +287,27 @@ export class HexGpuRenderer implements Renderer<HexOptions> {
     clear();
     draw();
 
+    return { outWidth, outHeight };
+  }
+
+  render(input: ImageInput | ImageData, options: HexOptions = {}): ImageOutput {
+    const { outWidth, outHeight } = this.submit(input, options);
     return {
       data: readPixels(outWidth, outHeight),
       width: outWidth,
       height: outHeight,
     };
+  }
+
+  /** Non-blocking variant using asynchronous PBO readback. */
+  async renderAsync(
+    input: ImageInput | ImageData,
+    options: HexOptions = {},
+    out?: Uint8ClampedArray
+  ): Promise<ImageOutput> {
+    const { outWidth, outHeight } = this.submit(input, options);
+    const data = await readPixelsAsync(outWidth, outHeight, out);
+    return { data, width: outWidth, height: outHeight };
   }
 
   dispose(): void {
