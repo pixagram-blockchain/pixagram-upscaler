@@ -1,6 +1,6 @@
 {
   "name": "@pixagram/upscaler",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "High-performance pixel art rendering engines with WebGL2 GPU acceleration and WASM support",
   "keywords": [
     "pixel-art",
@@ -60,7 +60,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "npm run build:wasm && npm run build:ts",
+    "build": "npm run build:threads && npm run build:ts",
     "build:ts": "tsc",
     "build:wasm": "wasm-pack build --target web --out-dir dist/wasm && npm run build:wasm:cleanup",
     "build:wasm:cleanup": "rm -f dist/wasm/.gitignore dist/wasm/package.json",
