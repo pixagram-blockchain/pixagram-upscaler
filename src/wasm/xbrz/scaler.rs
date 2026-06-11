@@ -58,15 +58,41 @@ pub(crate) trait Scaler<const SCALE: usize> {
                 ycbcr.dist(kernel.$x(), kernel.$y())
             };
         }
+
+        let tol = config.equal_color_tolerance as f32;
         macro_rules! eq {
             ($x:ident, $y:ident) => {
-                dist!($x, $y) < config.equal_color_tolerance as f32
+                dist!($x, $y) < tol
             };
         }
         macro_rules! neq {
             ($x:ident, $y:ident) => {
-                dist!($x, $y) >= config.equal_color_tolerance as f32
+                dist!($x, $y) >= tol
             };
+        }
+
+        // dist(e,g) and dist(e,c) can each be needed twice: once by the
+        // insular-pixel checks below and once by the line-direction checks
+        // further down. Memoise them lazily (NaN = not yet computed; dist()
+        // never returns NaN) so we keep the original short-circuit behaviour
+        // while never paying for the same distance twice.
+        let mut d_eg = f32::NAN;
+        let mut d_ec = f32::NAN;
+        macro_rules! dist_eg {
+            () => {{
+                if d_eg.is_nan() {
+                    d_eg = dist!(e, g);
+                }
+                d_eg
+            }};
+        }
+        macro_rules! dist_ec {
+            () => {{
+                if d_ec.is_nan() {
+                    d_ec = dist!(e, c);
+                }
+                d_ec
+            }};
         }
 
         let do_line_blend = 'a: {
@@ -77,10 +103,10 @@ pub(crate) trait Scaler<const SCALE: usize> {
             // make sure there is no second blending in an adjacent rotation for this pixel:
             // handles insular pixels, mario eyes;
             // but support double blending for 90-degree corners
-            if blend.top_right != BlendType::None && neq!(e, g) {
+            if blend.top_right != BlendType::None && dist_eg!() >= tol {
                 break 'a false;
             }
-            if blend.bottom_left != BlendType::None && neq!(e, c) {
+            if blend.bottom_left != BlendType::None && dist_ec!() >= tol {
                 break 'a false;
             }
 
@@ -103,11 +129,12 @@ pub(crate) trait Scaler<const SCALE: usize> {
         if do_line_blend {
             let fg = dist!(f, g);
             let hc = dist!(h, c);
+            let steep_threshold = config.steep_direction_threshold as f32;
 
             let shallow_line =
-                config.steep_direction_threshold as f32 * fg <= hc && neq!(e, g) && neq!(d, g);
+                steep_threshold * fg <= hc && dist_eg!() >= tol && neq!(d, g);
             let steep_line =
-                config.steep_direction_threshold as f32 * hc <= fg && neq!(e, c) && neq!(b, c);
+                steep_threshold * hc <= fg && dist_ec!() >= tol && neq!(b, c);
 
             match (shallow_line, steep_line) {
                 (true, true) => Self::blend_line_steep_and_shallow(px, &mut out),

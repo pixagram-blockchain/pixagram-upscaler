@@ -1,0 +1,29 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_dimensions_free: (a: number, b: number) => void;
+export const __wbg_get_dimensions_height: (a: number) => number;
+export const __wbg_get_dimensions_width: (a: number) => number;
+export const __wbg_get_upscaleresult_height: (a: number) => number;
+export const __wbg_get_upscaleresult_width: (a: number) => number;
+export const __wbg_set_dimensions_height: (a: number, b: number) => void;
+export const __wbg_set_dimensions_width: (a: number, b: number) => void;
+export const __wbg_set_upscaleresult_height: (a: number, b: number) => void;
+export const __wbg_set_upscaleresult_width: (a: number, b: number) => void;
+export const __wbg_upscaleresult_free: (a: number, b: number) => void;
+export const crt_upscale: (a: number, b: number, c: number, d: number, e: number) => number;
+export const crt_upscale_config: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => number;
+export const hex_get_dimensions: (a: number, b: number, c: number, d: number) => number;
+export const hex_upscale: (a: number, b: number, c: number, d: number, e: number) => number;
+export const hex_upscale_config: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => number;
+export const xbrz_upscale: (a: number, b: number, c: number, d: number, e: number) => number;
+export const xbrz_upscale_config: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => number;
+export const __wbg_get_upscaleresult_len: (a: number) => number;
+export const __wbg_get_upscaleresult_ptr: (a: number) => number;
+export const __wbg_set_upscaleresult_len: (a: number, b: number) => void;
+export const __wbg_set_upscaleresult_ptr: (a: number, b: number) => void;
+export const get_memory: () => any;
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_start: () => void;

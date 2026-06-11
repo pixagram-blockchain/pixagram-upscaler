@@ -1,5 +1,6 @@
 //! Hexagonal Pixel Art Upscaling Engine
-//! Optimized with analytical border detection and pre-computed geometry.
+//! Optimized with analytical border detection, per-frame column tables,
+//! single hex-round per pixel, and source-cell caching.
 
 /// Hexagon orientation
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,10 +85,10 @@ impl HexGeometry {
                 let v_spacing = size * sqrt3;
                 let cell_w = size * 2.0;
                 let cell_h = size * sqrt3;
-                
+
                 let out_w = w * h_spacing + cell_w;
                 let out_h = h * v_spacing + cell_h + (size * sqrt3 * 0.5);
-                
+
                 (out_w.ceil() as u32, out_h.ceil() as u32)
             }
             HexOrientation::PointyTop => {
@@ -104,17 +105,7 @@ impl HexGeometry {
         }
     }
 
-    #[inline(always)]
-    fn pixel_to_hex_fractional(&self, x: f32, y: f32) -> (f32, f32) {
-        let adj_x = x - self.offset_x;
-        let adj_y = y - self.offset_y;
-        
-        let q = self.m00 * adj_x + self.m01 * adj_y;
-        let r = self.m10 * adj_x + self.m11 * adj_y;
-        
-        (q, r)
-    }
-
+    /// Round fractional axial coordinates to the containing hex cell.
     #[inline(always)]
     fn hex_round(&self, q: f32, r: f32) -> (i32, i32) {
         let s = -q - r;
@@ -131,40 +122,32 @@ impl HexGeometry {
         } else if r_diff > s_diff {
             ri = -qi - si;
         }
-        
+
         (qi as i32, ri as i32)
     }
 
+    /// Rounded axial (cube) -> offset grid (col, row).
     #[inline(always)]
-    fn fractional_to_grid(&self, q: f32, r: f32) -> (i32, i32) {
-        let (rq, rr) = self.hex_round(q, r);
+    fn rounded_to_grid(&self, rq: i32, rr: i32) -> (i32, i32) {
         match self.orientation {
-            HexOrientation::FlatTop => {
-                (rq, rr + (rq - (rq & 1)) / 2)
-            }
-            HexOrientation::PointyTop => {
-                (rq + (rr - (rr & 1)) / 2, rr)
-            }
+            HexOrientation::FlatTop => (rq, rr + (rq - (rq & 1)) / 2),
+            HexOrientation::PointyTop => (rq + (rr - (rr & 1)) / 2, rr),
         }
     }
 
+    /// Analytical hexagon edge-distance test against the *already rounded*
+    /// cell center. The previous version re-ran `hex_round` (plus three dead
+    /// `round()` calls) for every border-checked pixel; the rounded center is
+    /// now computed once per pixel and shared with the grid lookup.
     #[inline(always)]
-    fn is_in_border(&self, q: f32, r: f32, thickness: f32) -> bool {
+    fn is_in_border(&self, q: f32, r: f32, rq: i32, rr: i32, thresh: f32) -> bool {
         let s = -q - r;
-        // Suppress unused warnings by using _ prefix
-        let _rq = q.round();
-        let _rr = r.round();
-        let _rs = s.round(); 
+        let cs = -rq - rr;
 
-        let (cq, cr) = self.hex_round(q, r);
-        let cs = -cq - cr;
-        
-        let dist = (q - cq as f32).abs()
-            .max((r - cr as f32).abs())
+        let dist = (q - rq as f32).abs()
+            .max((r - rr as f32).abs())
             .max((s - cs as f32).abs());
 
-        let thresh = 0.5 - (thickness * 0.55 / self.scale);
-        
         dist > thresh
     }
 }
@@ -181,6 +164,7 @@ pub fn get_output_dimensions(
     (out_w as usize, out_h as usize)
 }
 
+/// Allocating wrapper around [`hex_upscale_into`].
 pub fn hex_upscale(
     input: &[u8],
     src_w: usize,
@@ -188,12 +172,31 @@ pub fn hex_upscale(
     scale: usize,
     config: &HexConfig,
 ) -> Vec<u8> {
+    let (out_w, out_h) = get_output_dimensions(src_w, src_h, scale, &config.orientation);
+    let mut output = vec![0u8; out_w * out_h * 4];
+    hex_upscale_into(input, src_w, src_h, scale, config, &mut output);
+    output
+}
+
+/// Renders the hex effect directly into `output` (length must match
+/// [`get_output_dimensions`] `* 4`). Every output byte is written, so the
+/// buffer may safely contain stale data from a previous frame - this is the
+/// zero-copy path used by the wasm shared buffer.
+pub fn hex_upscale_into(
+    input: &[u8],
+    src_w: usize,
+    src_h: usize,
+    scale: usize,
+    config: &HexConfig,
+    output: &mut [u8],
+) {
     let scale = scale.clamp(2, 32) as u32;
     let geometry = HexGeometry::new(scale, config.orientation);
     let (out_w, out_h) = geometry.output_dimensions(src_w as u32, src_h as u32);
     let out_w = out_w as usize;
     let out_h = out_h as usize;
-    let mut output = vec![0u8; out_w * out_h * 4];
+    assert_eq!(output.len(), out_w * out_h * 4, "output buffer size mismatch");
+    assert!(input.len() >= src_w * src_h * 4, "input buffer too small");
 
     let bg = [
         ((config.background_color >> 24) & 0xFF) as u8,
@@ -210,10 +213,22 @@ pub fn hex_upscale(
     ];
 
     let check_borders = config.draw_borders && config.border_thickness > 0;
-    let border_thickness_f = config.border_thickness as f32;
+    // Hoisted: was recomputed for every border-checked pixel.
+    let border_thresh = 0.5 - (config.border_thickness as f32 * 0.55 / geometry.scale);
 
     let src_w_i = src_w as i32;
     let src_h_i = src_h as i32;
+
+    // Per-frame column table: `q` and `r` are affine in x, so the x-dependent
+    // products `m00*adj_x` / `m10*adj_x` are computed once per frame instead
+    // of once per pixel. Per pixel this leaves a single add for each axis
+    // (identical float results: same products, same addition order).
+    let col_lut: Vec<[f32; 2]> = (0..out_w)
+        .map(|x| {
+            let adj_x = x as f32 - geometry.offset_x;
+            [geometry.m00 * adj_x, geometry.m10 * adj_x]
+        })
+        .collect();
 
     // Each output row is independent. With the `parallel` feature rows are
     // distributed across the rayon thread pool; otherwise they run serially.
@@ -226,38 +241,29 @@ pub fn hex_upscale(
             .enumerate()
             .for_each(|(y, row)| {
                 hex_render_row(
-                    row, y, out_w, &geometry, input, src_w, src_w_i, src_h_i,
-                    &bg, &border, check_borders, border_thickness_f,
+                    row, y, &geometry, input, src_w, src_w_i, src_h_i,
+                    &bg, &border, check_borders, border_thresh, &col_lut,
                 );
             });
     }
 
     #[cfg(not(feature = "parallel"))]
     {
-        for y in 0..out_h {
-            let row = &mut output[y * out_w * 4..(y + 1) * out_w * 4];
+        for (y, row) in output.chunks_exact_mut(out_w * 4).enumerate() {
             hex_render_row(
-                row, y, out_w, &geometry, input, src_w, src_w_i, src_h_i,
-                &bg, &border, check_borders, border_thickness_f,
+                row, y, &geometry, input, src_w, src_w_i, src_h_i,
+                &bg, &border, check_borders, border_thresh, &col_lut,
             );
         }
     }
-
-    output
 }
 
 /// Renders a single output row (`row` has length `out_w * 4`) of the hex effect.
-///
-/// Shared per-row kernel for the serial and parallel code paths. The geometry
-/// and per-pixel decisions are identical to the original double loop; only the
-/// destination addressing changed from `(y*out_w + x)*4` to a row-relative
-/// `x*4`, so rayon can pass each invocation a disjoint mutable row slice.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn hex_render_row(
     row: &mut [u8],
     y: usize,
-    out_w: usize,
     geometry: &HexGeometry,
     input: &[u8],
     src_w: usize,
@@ -266,25 +272,47 @@ fn hex_render_row(
     bg: &[u8; 4],
     border: &[u8; 4],
     check_borders: bool,
-    border_thickness_f: f32,
+    border_thresh: f32,
+    col_lut: &[[f32; 2]],
 ) {
-    let y_f = y as f32;
-    for x in 0..out_w {
-        let x_f = x as f32;
+    let adj_y = y as f32 - geometry.offset_y;
+    // Row-invariant halves of the affine map.
+    let q_row = geometry.m01 * adj_y;
+    let r_row = geometry.m11 * adj_y;
 
-        let (q, r) = geometry.pixel_to_hex_fractional(x_f, y_f);
-        let (hex_col, hex_row) = geometry.fractional_to_grid(q, r);
-        let out_idx = x * 4;
+    // Source-cell cache: consecutive pixels along a row usually fall in the
+    // same hexagon (a span of ~1.5x scale pixels), so the bounds check and
+    // source fetch are done once per cell instead of once per pixel.
+    let mut last_cell = (i32::MIN, i32::MIN);
+    let mut cell_color = *bg;
+    let mut cell_in_bounds = false;
 
-        if hex_col >= 0 && hex_row >= 0 && hex_col < src_w_i && hex_row < src_h_i {
-            if check_borders && geometry.is_in_border(q, r, border_thickness_f) {
-                row[out_idx..out_idx + 4].copy_from_slice(border);
-            } else {
+    for (px, lut) in row.chunks_exact_mut(4).zip(col_lut) {
+        let q = lut[0] + q_row;
+        let r = lut[1] + r_row;
+
+        // One hex_round per pixel, shared by the grid lookup and border test.
+        let (rq, rr) = geometry.hex_round(q, r);
+
+        if (rq, rr) != last_cell {
+            last_cell = (rq, rr);
+            let (hex_col, hex_row) = geometry.rounded_to_grid(rq, rr);
+            cell_in_bounds =
+                hex_col >= 0 && hex_row >= 0 && hex_col < src_w_i && hex_row < src_h_i;
+            if cell_in_bounds {
                 let src_idx = (hex_row as usize * src_w + hex_col as usize) * 4;
-                row[out_idx..out_idx + 4].copy_from_slice(&input[src_idx..src_idx + 4]);
+                cell_color.copy_from_slice(&input[src_idx..src_idx + 4]);
+            }
+        }
+
+        if cell_in_bounds {
+            if check_borders && geometry.is_in_border(q, r, rq, rr, border_thresh) {
+                px.copy_from_slice(border);
+            } else {
+                px.copy_from_slice(&cell_color);
             }
         } else {
-            row[out_idx..out_idx + 4].copy_from_slice(bg);
+            px.copy_from_slice(bg);
         }
     }
 }

@@ -1,4 +1,4 @@
-use parking_lot::Once;
+use std::sync::OnceLock;
 
 use super::pixel::Pixel;
 
@@ -19,9 +19,27 @@ pub(crate) enum YCbCrLookup {
     IDiff888(Box<[f32]>),
 }
 
-// SAFETY: Only written to once by the closure in instance(), which is mediated by a parking_lot::Once.
-static mut LOOKUP_INSTANCE: Option<YCbCrLookup> = None;
-static LOOKUP_LOCK: Once = Once::new();
+/// `OnceLock` replaces the previous `static mut Option<..> + parking_lot::Once`
+/// pair. It is safe for concurrent readers (required by the `parallel`
+/// feature), guarantees single initialisation, and removes the
+/// `static_mut_refs` undefined behaviour the old code had.
+static LOOKUP_INSTANCE: OnceLock<YCbCrLookup> = OnceLock::new();
+
+/// `i as f32 / 255.0` for every i, precomputed at compile time.
+///
+/// `dist` runs ~10+ times per source pixel in the xBRZ hot path and previously
+/// performed two f32 *divisions* per call (LLVM cannot turn `x / 255.0` into a
+/// multiply because 1/255 is not exactly representable). Indexing this table
+/// is bit-identical to the original division, so output bytes do not change.
+static ALPHA_UNORM: [f32; 256] = {
+    let mut t = [0.0f32; 256];
+    let mut i = 0;
+    while i < 256 {
+        t[i] = i as f32 / 255.0;
+        i += 1;
+    }
+    t
+};
 
 #[inline]
 fn dist_ycbcr(r_diff: i16, g_diff: i16, b_diff: i16) -> f64 {
@@ -47,32 +65,38 @@ fn dist_ycbcr(r_diff: i16, g_diff: i16, b_diff: i16) -> f64 {
 impl YCbCrLookup {
     #[inline]
     pub(crate) fn instance() -> &'static Self {
-        Self::initialise();
-
-        unsafe { Self::instance_unchecked() }
+        LOOKUP_INSTANCE.get_or_init(Self::new)
     }
 
+    /// Build the table now (used to warm it up on the calling thread before
+    /// the parallel scaler reads it through [`instance_unchecked`]).
     #[inline]
     pub(crate) fn initialise() {
-        LOOKUP_LOCK.call_once(|| unsafe {
-            #[cfg(feature = "large_lut")]
-            {
-                LOOKUP_INSTANCE = Some(Self::new_large());
-            }
-            #[cfg(not(feature = "large_lut"))]
-            {
-                LOOKUP_INSTANCE = Some(Self::new_small());
-            }
-        });
+        let _ = Self::instance();
     }
 
+    /// # Safety
+    /// [`initialise`](Self::initialise) (or any call to
+    /// [`instance`](Self::instance)) must have completed first.
     #[inline]
     pub(crate) unsafe fn instance_unchecked() -> &'static Self {
-        unsafe { LOOKUP_INSTANCE.as_ref().unwrap_unchecked() }
+        // SAFETY: caller guarantees the cell is populated.
+        unsafe { LOOKUP_INSTANCE.get().unwrap_unchecked() }
     }
 
     pub(crate) fn instance_is_initialised() -> bool {
-        unsafe { LOOKUP_INSTANCE.is_some() }
+        LOOKUP_INSTANCE.get().is_some()
+    }
+
+    fn new() -> Self {
+        #[cfg(feature = "large_lut")]
+        {
+            Self::new_large()
+        }
+        #[cfg(not(feature = "large_lut"))]
+        {
+            Self::new_small()
+        }
     }
 
     pub(crate) fn new_small() -> Self {
@@ -124,8 +148,9 @@ impl YCbCrLookup {
     }
 
     pub(crate) fn dist<P: Pixel>(&self, pix1: P, pix2: P) -> f32 {
-        let a1 = pix1.alpha() as f32 / u8::MAX as f32;
-        let a2 = pix2.alpha() as f32 / u8::MAX as f32;
+        // Table lookup instead of `alpha() as f32 / 255.0`: same bits, no divide.
+        let a1 = ALPHA_UNORM[pix1.alpha() as usize];
+        let a2 = ALPHA_UNORM[pix2.alpha() as usize];
 
         let d = self.dist_rgb(pix1.to_rgb(), pix2.to_rgb());
         if a1 < a2 {
@@ -139,7 +164,14 @@ impl YCbCrLookup {
 #[cfg(test)]
 mod test {
     use super::super::pixel::Rgb8;
-    use super::{dist_ycbcr, YCbCrLookup};
+    use super::{dist_ycbcr, YCbCrLookup, ALPHA_UNORM};
+
+    #[test]
+    fn alpha_unorm_matches_division() {
+        for i in 0..=255usize {
+            assert_eq!(ALPHA_UNORM[i], i as f32 / 255.0);
+        }
+    }
 
     fn test_lut(lut: &YCbCrLookup, rgb1: (u8, u8, u8), rgb2: (u8, u8, u8)) {
         let (r1, g1, b1) = rgb1;

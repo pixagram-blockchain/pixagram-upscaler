@@ -9,6 +9,9 @@ mod crt;
 mod hex;
 mod xbrz;
 
+#[cfg(test)]
+mod golden_tests;
+
 // Thread-local shared buffer - safe, no `unsafe` needed for access
 thread_local! {
     static SHARED_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
@@ -40,31 +43,13 @@ pub fn get_memory() -> JsValue {
 // Internal Helpers
 // ============================================================================
 
-/// Updates the shared buffer, reusing capacity when possible.
-#[inline]
-fn update_buffer(output: Vec<u8>, width: u32, height: u32) -> UpscaleResult {
-    SHARED_BUFFER.with(|buf| {
-        let mut buffer = buf.borrow_mut();
-        
-        // Reuse existing capacity if sufficient, otherwise take the new buffer
-        if buffer.capacity() >= output.len() {
-            buffer.clear();
-            buffer.extend_from_slice(&output);
-        } else {
-            *buffer = output;
-        }
-
-        UpscaleResult {
-            ptr: buffer.as_ptr() as u32,
-            len: buffer.len() as u32,
-            width,
-            height,
-        }
-    })
-}
-
-/// Updates buffer by writing directly into pre-sized buffer (zero-copy path).
-/// Use when the renderer can write into a provided slice.
+/// Runs `f` with a mutable view of the shared output buffer, sized to exactly
+/// `required_len` bytes. The buffer's capacity is reused across calls, so a
+/// steady-state render loop performs no heap allocation at all.
+///
+/// All renderers passed here are required to write *every* byte of the output
+/// slice (the `*_into` functions uphold this), so stale data from a previous
+/// frame can never leak into the result.
 #[inline]
 fn with_buffer<F>(required_len: usize, width: u32, height: u32, f: F) -> UpscaleResult
 where
@@ -73,15 +58,15 @@ where
     SHARED_BUFFER.with(|buf| {
         let mut buffer = buf.borrow_mut();
 
-        // Ensure capacity and set length
+        // Ensure capacity and set length. `resize` zero-fills only newly
+        // grown bytes; shrinking just adjusts the view and keeps capacity.
         if buffer.len() < required_len {
             buffer.resize(required_len, 0);
         } else {
-            // Reuse existing memory, just adjust view
             buffer.truncate(required_len);
         }
 
-        // Let renderer write directly
+        // Let the renderer write directly into the shared buffer.
         f(&mut buffer[..required_len]);
 
         UpscaleResult {
@@ -135,18 +120,23 @@ pub fn crt_upscale_config(
         enable_mask,
     };
 
+    // Mirror the clamp inside crt_upscale_into so the reported dimensions
+    // and the buffer size always agree with what the renderer produces.
+    let scale = scale.clamp(2, 32);
     let out_w = width * scale;
     let out_h = height * scale;
     let required = (out_w * out_h * 4) as usize;
 
-    // If your crt module supports writing to a slice, use with_buffer:
-    // with_buffer(required, out_w, out_h, |out| {
-    //     crt::crt_upscale_into(data, width as usize, height as usize, scale as usize, &config, out);
-    // })
-    
-    // Otherwise, use the allocating path:
-    let output = crt::crt_upscale(data, width as usize, height as usize, scale as usize, &config);
-    update_buffer(output, out_w, out_h)
+    with_buffer(required, out_w, out_h, |out| {
+        crt::crt_upscale_into(
+            data,
+            width as usize,
+            height as usize,
+            scale as usize,
+            &config,
+            out,
+        );
+    })
 }
 
 // ============================================================================
@@ -208,26 +198,33 @@ pub fn hex_upscale_config(
     };
 
     let config = hex::HexConfig {
-        orientation: orient.clone(),
+        orientation: orient,
         draw_borders,
         border_color,
         border_thickness: border_thickness as usize,
         background_color,
     };
 
-    // Calculate dimensions once
+    // get_output_dimensions applies the same scale clamp as hex_upscale_into,
+    // so `required` always matches the renderer's own size assertion.
     let (out_w, out_h) = hex::get_output_dimensions(
         width as usize,
         height as usize,
         scale as usize,
         &orient,
     );
+    let required = out_w * out_h * 4;
 
-    // If hex module can take pre-computed dimensions to avoid recalculating:
-    // let output = hex::hex_upscale_with_dims(data, width as usize, height as usize, scale as usize, &config, out_w, out_h);
-    
-    let output = hex::hex_upscale(data, width as usize, height as usize, scale as usize, &config);
-    update_buffer(output, out_w as u32, out_h as u32)
+    with_buffer(required, out_w as u32, out_h as u32, |out| {
+        hex::hex_upscale_into(
+            data,
+            width as usize,
+            height as usize,
+            scale as usize,
+            &config,
+            out,
+        );
+    })
 }
 
 // ============================================================================
@@ -255,20 +252,52 @@ pub fn xbrz_upscale_config(
     dominant_direction_threshold: f64,
     steep_direction_threshold: f64,
 ) -> UpscaleResult {
-    let clamped_scale = scale.clamp(1, 6) as usize;
-    let out_w = width * clamped_scale as u32;
-    let out_h = height * clamped_scale as u32;
+    let clamped_scale = scale.clamp(1, 6);
+    let out_w = width * clamped_scale;
+    let out_h = height * clamped_scale;
+    let required = (out_w * out_h * 4) as usize;
 
-    let output = xbrz::xbrz_upscale(
-        data,
-        width as usize,
-        height as usize,
-        clamped_scale,
-        equal_color_tolerance,
-        center_direction_bias,
-        dominant_direction_threshold,
-        steep_direction_threshold,
-    );
+    with_buffer(required, out_w, out_h, |out| {
+        xbrz::xbrz_upscale_into(
+            data,
+            width as usize,
+            height as usize,
+            clamped_scale as usize,
+            equal_color_tolerance,
+            center_direction_bias,
+            dominant_direction_threshold,
+            steep_direction_threshold,
+            out,
+        );
+    })
+}
 
-    update_buffer(output, out_w, out_h)
+// ============================================================================
+// Native benchmark hooks (not part of the wasm API)
+// ============================================================================
+#[doc(hidden)]
+pub mod bench_api {
+    pub fn crt(data: &[u8], w: usize, h: usize, scale: usize) -> Vec<u8> {
+        crate::crt::crt_upscale(data, w, h, scale, &crate::crt::CrtConfig::default())
+    }
+    pub fn crt_into(data: &[u8], w: usize, h: usize, scale: usize, out: &mut [u8]) {
+        crate::crt::crt_upscale_into(data, w, h, scale, &crate::crt::CrtConfig::default(), out)
+    }
+    pub fn hex(data: &[u8], w: usize, h: usize, scale: usize, borders: bool) -> Vec<u8> {
+        let cfg = crate::hex::HexConfig { draw_borders: borders, ..Default::default() };
+        crate::hex::hex_upscale(data, w, h, scale, &cfg)
+    }
+    pub fn hex_dims(w: usize, h: usize, scale: usize) -> (usize, usize) {
+        crate::hex::get_output_dimensions(w, h, scale, &crate::hex::HexOrientation::FlatTop)
+    }
+    pub fn hex_into(data: &[u8], w: usize, h: usize, scale: usize, borders: bool, out: &mut [u8]) {
+        let cfg = crate::hex::HexConfig { draw_borders: borders, ..Default::default() };
+        crate::hex::hex_upscale_into(data, w, h, scale, &cfg, out)
+    }
+    pub fn xbrz(data: &[u8], w: usize, h: usize, scale: usize) -> Vec<u8> {
+        crate::xbrz::xbrz_upscale(data, w, h, scale, 30.0, 4.0, 3.6, 2.2)
+    }
+    pub fn xbrz_into(data: &[u8], w: usize, h: usize, scale: usize, out: &mut [u8]) {
+        crate::xbrz::xbrz_upscale_into(data, w, h, scale, 30.0, 4.0, 3.6, 2.2, out)
+    }
 }

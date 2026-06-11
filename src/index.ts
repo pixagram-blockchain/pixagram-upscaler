@@ -11,6 +11,7 @@
 export type {
   ImageInput,
   ImageOutput,
+  RenderSource,
   Renderer,
   CrtOptions,
   HexOptions,
@@ -26,6 +27,14 @@ export { HexGpuRenderer, HEX_PRESETS, hexGetDimensions } from './hex-gpu.js';
 
 // xBRZ Renderer
 export { XbrzGpuRenderer, XBRZ_PRESETS } from './xbrz-gpu.js';
+
+// Off-main-thread rendering
+export { WorkerRenderer } from './worker-client.js';
+export type { WorkerRendererOptions } from './worker-client.js';
+export type { EffectName, WorkerOutputKind, WorkerRequest, WorkerResponse } from './worker-protocol.js';
+
+// GPU utilities (device limits / memory management)
+export { getMaxOutputDimension, trimMemory } from './gpu-context.js';
 
 import { CrtGpuRenderer } from './crt-gpu.js';
 import { HexGpuRenderer } from './hex-gpu.js';

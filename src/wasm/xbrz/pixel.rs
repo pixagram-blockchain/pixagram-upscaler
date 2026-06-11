@@ -128,7 +128,10 @@ impl Pixel for Rgb8 {
     }
 
     fn gradient<const M: usize, const N: usize>(front: Self, back: Self) -> Self {
-        todo!()
+        // Rgb8 is fully opaque (alpha() == 255), so the generic alpha-weighted
+        // gradient degenerates to a plain M/N mix. Replaces a `todo!()` that
+        // would have panicked at runtime.
+        gradient_rgba::<Self, M, N>(front, back)
     }
 }
 
@@ -189,6 +192,12 @@ impl Debug for Argb8 {
 #[repr(C)]
 #[derive(Default, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct Rgba8([u8; 4]);
+
+// SAFETY: `Rgba8` is `repr(C)`, contains only `[u8; 4]` (no padding, every bit
+// pattern valid), so it is plain-old-data. This enables safe
+// `bytemuck::cast_slice` between `[u8]` and `[Rgba8]` in the zero-copy path.
+unsafe impl bytemuck::Zeroable for Rgba8 {}
+unsafe impl bytemuck::Pod for Rgba8 {}
 
 impl Debug for Rgba8 {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {

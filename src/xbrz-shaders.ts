@@ -6,6 +6,11 @@
 export const XBRZ_VERTEX_SHADER = `#version 300 es
 layout(location = 0) in vec2 position;
 uniform vec2 uInputRes;
+// uFlipY: 0.0 -> orientation for top-down readPixels output;
+//         1.0 -> orientation for direct canvas / ImageBitmap presentation.
+// Applied before the neighbour taps are derived, so the whole 5x5 kernel
+// stays consistent in input-texture space.
+uniform float uFlipY;
 
 out vec2 vTexCoord;
 out vec4 t1;
@@ -18,6 +23,7 @@ out vec4 t7;
 
 void main() {
     vTexCoord = position * 0.5 + 0.5;
+    vTexCoord.y = mix(vTexCoord.y, 1.0 - vTexCoord.y, uFlipY);
     gl_Position = vec4(position, 0.0, 1.0);
 
     vec2 ps = vec2(1.0) / uInputRes;

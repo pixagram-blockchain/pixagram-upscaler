@@ -5,8 +5,6 @@
 //!
 //! This project is a direct port of xBRZ version 1.8 into Rust.
 //!
-use std::mem;
-
 use self::config::ScalerConfig;
 use self::oob_reader::OobReaderTransparent;
 use self::pixel::{Pixel, Rgba8};
@@ -41,83 +39,73 @@ mod ycbcr_lookup;
 /// Panics if the `source` slice length is not exactly equal to `src_width * src_height * 4`,
 /// or if `factor` is not one of 1, 2, 3, 4, 5 or 6.
 pub fn scale_rgba(source: &[u8], src_width: usize, src_height: usize, factor: usize) -> Vec<u8> {
-    scale::<Rgba8>(source, src_width, src_height, factor)
+    scale_rgba_config(source, src_width, src_height, factor, &ScalerConfig::default())
 }
 
 /// Use the xBRZ algorithm to scale up an image with custom configuration.
 pub fn scale_rgba_config(
-    source: &[u8], 
-    src_width: usize, 
-    src_height: usize, 
-    factor: usize,
-    config: &ScalerConfig,
-) -> Vec<u8> {
-    scale_with_config::<Rgba8>(source, src_width, src_height, factor, config)
-}
-
-fn scale<P: Pixel + Send + Sync>(
     source: &[u8],
     src_width: usize,
     src_height: usize,
     factor: usize,
-) -> Vec<u8> {
-    let config = ScalerConfig::default();
-    scale_with_config::<P>(source, src_width, src_height, factor, &config)
-}
-
-fn scale_with_config<P: Pixel + Send + Sync>(
-    source: &[u8], 
-    src_width: usize, 
-    src_height: usize, 
-    factor: usize,
     config: &ScalerConfig,
 ) -> Vec<u8> {
-    const U8_SIZE: usize = mem::size_of::<u8>();
+    let mut destination = vec![0u8; src_width * src_height * factor * factor * 4];
+    scale_rgba_config_into(source, src_width, src_height, factor, config, &mut destination);
+    destination
+}
 
+/// Use the xBRZ algorithm to scale up an image, writing directly into a
+/// caller-provided buffer (`src_width*factor * src_height*factor * 4` bytes).
+///
+/// Every destination pixel is written (`fill_block` covers the full
+/// `SCALE x SCALE` block before blending), so the buffer may contain stale
+/// data from a previous frame. This is the zero-copy path used by the wasm
+/// shared buffer, removing one full-output allocation + memcpy per call.
+pub fn scale_rgba_config_into(
+    source: &[u8],
+    src_width: usize,
+    src_height: usize,
+    factor: usize,
+    config: &ScalerConfig,
+    destination: &mut [u8],
+) {
+    scale_with_config_into::<Rgba8>(source, src_width, src_height, factor, config, destination);
+}
+
+fn scale_with_config_into<P: Pixel + bytemuck::Pod + Send + Sync>(
+    source: &[u8],
+    src_width: usize,
+    src_height: usize,
+    factor: usize,
+    config: &ScalerConfig,
+    destination: &mut [u8],
+) {
     if src_width == 0 || src_height == 0 {
-        return vec![];
+        assert!(destination.is_empty());
+        return;
     }
 
     assert_eq!(source.len(), src_width * src_height * P::SIZE);
-    let (_, src_argb, _) = unsafe { source.align_to::<P>() };
-    assert_eq!(src_argb.len(), src_width * src_height);
-
+    assert_eq!(
+        destination.len(),
+        src_width * src_height * factor * factor * P::SIZE
+    );
     assert!(factor > 0);
     assert!(factor <= 6);
 
-    let dst_argb = if factor == 1 {
-        src_argb.to_owned()
-    } else {
-        let mut dst_argb = vec![P::default(); src_width * src_height * factor * factor];
-        match factor {
-            0 | 1 => unreachable!(),
-            2 => run_scaler::<P, Scaler2x, 2>(
-                src_argb, dst_argb.as_mut_slice(), src_width, src_height, config,
-            ),
-            3 => run_scaler::<P, Scaler3x, 3>(
-                src_argb, dst_argb.as_mut_slice(), src_width, src_height, config,
-            ),
-            4 => run_scaler::<P, Scaler4x, 4>(
-                src_argb, dst_argb.as_mut_slice(), src_width, src_height, config,
-            ),
-            5 => run_scaler::<P, Scaler5x, 5>(
-                src_argb, dst_argb.as_mut_slice(), src_width, src_height, config,
-            ),
-            6 => run_scaler::<P, Scaler6x, 6>(
-                src_argb, dst_argb.as_mut_slice(), src_width, src_height, config,
-            ),
-            7.. => unreachable!(),
-        };
-        dst_argb
-    };
+    // Safe reinterpretation: P is plain-old-data with alignment 1.
+    let src_argb: &[P] = bytemuck::cast_slice(source);
+    let dst_argb: &mut [P] = bytemuck::cast_slice_mut(destination);
 
-    unsafe {
-        let mut dst_nodrop = mem::ManuallyDrop::new(dst_argb);
-        Vec::from_raw_parts(
-            dst_nodrop.as_mut_ptr() as *mut u8,
-            dst_nodrop.len() * P::SIZE / U8_SIZE,
-            dst_nodrop.capacity() * P::SIZE / U8_SIZE,
-        )
+    match factor {
+        1 => dst_argb.copy_from_slice(src_argb),
+        2 => run_scaler::<P, Scaler2x, 2>(src_argb, dst_argb, src_width, src_height, config),
+        3 => run_scaler::<P, Scaler3x, 3>(src_argb, dst_argb, src_width, src_height, config),
+        4 => run_scaler::<P, Scaler4x, 4>(src_argb, dst_argb, src_width, src_height, config),
+        5 => run_scaler::<P, Scaler5x, 5>(src_argb, dst_argb, src_width, src_height, config),
+        6 => run_scaler::<P, Scaler6x, 6>(src_argb, dst_argb, src_width, src_height, config),
+        _ => unreachable!(),
     }
 }
 
@@ -224,4 +212,36 @@ pub fn xbrz_upscale(
     };
     
     scale_rgba_config(input, src_w, src_h, scale, &config)
+}
+
+/// Like [`xbrz_upscale`] but writes into a caller-provided buffer of exactly
+/// `src_w * scale * src_h * scale * 4` bytes, avoiding an allocation per call.
+/// Every output byte is written, so the buffer does not need to be zeroed.
+#[allow(clippy::too_many_arguments)]
+pub fn xbrz_upscale_into(
+    input: &[u8],
+    src_w: usize,
+    src_h: usize,
+    scale: usize,
+    equal_color_tolerance: f64,
+    center_direction_bias: f64,
+    dominant_direction_threshold: f64,
+    steep_direction_threshold: f64,
+    output: &mut [u8],
+) {
+    let scale = scale.clamp(1, 6);
+
+    if scale == 1 {
+        output.copy_from_slice(input);
+        return;
+    }
+
+    let config = config::ScalerConfig {
+        equal_color_tolerance,
+        center_direction_bias,
+        dominant_direction_threshold,
+        steep_direction_threshold,
+    };
+
+    scale_rgba_config_into(input, src_w, src_h, scale, &config, output);
 }

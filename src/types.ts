@@ -24,12 +24,22 @@ export interface ImageOutput {
   height: number;
 }
 
+/**
+ * Anything a renderer can consume as input.
+ *
+ * ImageBitmap is the most efficient choice when the pixels come from a
+ * decoded image, video frame or another canvas: it is uploaded to the GPU
+ * directly (often zero-copy) without ever materialising an RGBA array in
+ * JS memory.
+ */
+export type RenderSource = ImageInput | ImageData | ImageBitmap;
+
 /** Base renderer interface */
 export interface Renderer<TOptions = object> {
   /** Check if renderer is ready for use */
   isReady(): boolean;
   /** Render image with given options */
-  render(input: ImageInput | ImageData, options?: TOptions): ImageOutput;
+  render(input: RenderSource, options?: TOptions): ImageOutput;
   /** Dispose of renderer resources */
   dispose(): void;
 }

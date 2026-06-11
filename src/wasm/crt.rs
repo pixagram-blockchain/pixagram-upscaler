@@ -1,5 +1,8 @@
 //! CRT Effect Rendering Engine
-//! Optimized with Integer Math, separable warp logic, and Gamma LUT.
+//! Optimized with integer math, separable warp logic, gamma LUT, and
+//! per-frame precomputed column tables.
+
+use std::sync::OnceLock;
 
 /// CRT configuration
 #[derive(Clone, Copy)]
@@ -29,6 +32,45 @@ impl Default for CrtConfig {
     }
 }
 
+/// Gamma correction LUT (linear -> sRGB approximation, `sqrt`).
+///
+/// Config-independent, so it is built exactly once per process instead of
+/// being reallocated as a `Vec<u8>` on every call. Fixed-size array, no heap.
+#[inline]
+fn gamma_lut() -> &'static [u8; 256] {
+    static LUT: OnceLock<[u8; 256]> = OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut lut = [0u8; 256];
+        for (i, v) in lut.iter_mut().enumerate() {
+            let f = (i as f32 / 255.0).sqrt();
+            *v = (f * 255.0).clamp(0.0, 255.0) as u8;
+        }
+        lut
+    })
+}
+
+/// Per-output-column values that do not depend on the row:
+/// `[0] = u_norm`, `[1] = 1.0 + dc2_x * (0.4 * warp_y)` (the x-dependent
+/// factor of the vertical warp). Computed once per frame instead of once per
+/// pixel (removes a divide, an abs and two multiplies from the inner loop).
+fn build_column_lut(out_w: usize, config: &CrtConfig) -> Vec<[f32; 2]> {
+    let out_w_f = out_w as f32;
+    (0..out_w)
+        .map(|x| {
+            let u_norm = x as f32 / out_w_f;
+            let ywf = if config.enable_warp {
+                let dc_x = (u_norm - 0.5).abs();
+                let dc2_x = dc_x * dc_x;
+                1.0 + (dc2_x * (0.4 * config.warp_y))
+            } else {
+                1.0
+            };
+            [u_norm, ywf]
+        })
+        .collect()
+}
+
+/// Allocating wrapper around [`crt_upscale_into`].
 pub fn crt_upscale(
     input: &[u8],
     src_w: usize,
@@ -40,29 +82,43 @@ pub fn crt_upscale(
     let out_w = src_w * scale;
     let out_h = src_h * scale;
     let mut output = vec![0u8; out_w * out_h * 4];
+    crt_upscale_into(input, src_w, src_h, scale, config, &mut output);
+    output
+}
+
+/// Renders the CRT effect directly into `output` (length must be
+/// `src_w*scale * src_h*scale * 4`). Every output byte is written, so the
+/// buffer may safely contain stale data from a previous frame - this is the
+/// zero-copy path used by the wasm shared buffer.
+pub fn crt_upscale_into(
+    input: &[u8],
+    src_w: usize,
+    src_h: usize,
+    scale: usize,
+    config: &CrtConfig,
+    output: &mut [u8],
+) {
+    let scale = scale.clamp(2, 32);
+    let out_w = src_w * scale;
+    let out_h = src_h * scale;
+    assert_eq!(output.len(), out_w * out_h * 4, "output buffer size mismatch");
+    assert!(input.len() >= src_w * src_h * 4, "input buffer too small");
 
     // --- Pre-calculation Phase ---
 
-    // 1. Gamma Correction LUT (Linear -> sRGB approximation)
-    // Avoids per-pixel sqrt()
-    let gamma_lut: Vec<u8> = (0..=255).map(|i| {
-        let f = (i as f32 / 255.0).sqrt();
-        (f * 255.0).clamp(0.0, 255.0) as u8
-    }).collect();
+    // 1. Gamma Correction LUT (process-wide, see gamma_lut()).
+    let gamma_lut = gamma_lut();
 
-    // 2. Scanline LUT
-    let scan_lut: Vec<f32> = (0..=100)
-        .map(|i| {
-            if !config.enable_scanlines {
-                return 1.0;
-            }
-            let v = i as f32 / 100.0;
-            let d = (v - 0.5).abs();
-            // Simplify exp calculation? Keeping it for quality, done only 100 times.
+    // 2. Scanline LUT - fixed-size array on the stack, no allocation.
+    let mut scan_lut = [1.0f32; 101];
+    if config.enable_scanlines {
+        for (i, v) in scan_lut.iter_mut().enumerate() {
+            let t = i as f32 / 100.0;
+            let d = (t - 0.5).abs();
             let line = (d * d * config.scan_hardness).exp();
-            (1.0 - config.scan_opacity) + line * config.scan_opacity
-        })
-        .collect();
+            *v = (1.0 - config.scan_opacity) + line * config.scan_opacity;
+        }
+    }
 
     // 3. Mask LUT
     let mask_lut: [[f32; 3]; 6] = if config.enable_mask {
@@ -76,6 +132,9 @@ pub fn crt_upscale(
     } else {
         [[1.0, 1.0, 1.0]; 6]
     };
+
+    // 4. Row-invariant per-column table (u_norm and Y-warp factor).
+    let col_lut = build_column_lut(out_w, config);
 
     let src_w_f = src_w as f32;
     let src_h_f = src_h as f32;
@@ -96,38 +155,29 @@ pub fn crt_upscale(
             .enumerate()
             .for_each(|(y, row)| {
                 crt_render_row(
-                    row, y, out_w, out_h_f, src_w, src_h, src_w_f, src_h_f,
-                    input, config, &gamma_lut, &scan_lut, &mask_lut,
+                    row, y, out_h_f, src_w, src_h, src_w_f, src_h_f,
+                    input, config, gamma_lut, &scan_lut, &mask_lut, &col_lut,
                 );
             });
     }
 
     #[cfg(not(feature = "parallel"))]
     {
-        for y in 0..out_h {
-            let row = &mut output[y * out_w * 4..(y + 1) * out_w * 4];
+        for (y, row) in output.chunks_exact_mut(out_w * 4).enumerate() {
             crt_render_row(
-                row, y, out_w, out_h_f, src_w, src_h, src_w_f, src_h_f,
-                input, config, &gamma_lut, &scan_lut, &mask_lut,
+                row, y, out_h_f, src_w, src_h, src_w_f, src_h_f,
+                input, config, gamma_lut, &scan_lut, &mask_lut, &col_lut,
             );
         }
     }
-
-    output
 }
 
 /// Renders a single output row (`row` has length `out_w * 4`) of the CRT effect.
-///
-/// This is the per-row kernel shared by the serial and parallel code paths. The
-/// per-pixel math is identical to the original single-loop implementation; only
-/// the destination addressing changed from a global offset `(y*out_w + x)*4` to
-/// a row-relative `x*4`, which lets rayon hand each call a disjoint mutable row.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn crt_render_row(
     row: &mut [u8],
     y: usize,
-    out_w: usize,
     out_h_f: f32,
     src_w: usize,
     src_h: usize,
@@ -135,61 +185,57 @@ fn crt_render_row(
     src_h_f: f32,
     input: &[u8],
     config: &CrtConfig,
-    gamma_lut: &[u8],
-    scan_lut: &[f32],
+    gamma_lut: &[u8; 256],
+    scan_lut: &[f32; 101],
     mask_lut: &[[f32; 3]; 6],
+    col_lut: &[[f32; 2]],
 ) {
-    let out_w_f = out_w as f32;
-
     let v_norm = y as f32 / out_h_f;
     let dc_y = (v_norm - 0.5).abs();
     let dc2_y = dc_y * dc_y;
 
-    // Optimization: Calculate Row-Invariant Warp factors
-    // For a specific Y, the X-warp function is linear: u' = u * factor + offset
+    // Row-invariant X-warp factors: u' = u * scale + offset
     let (row_warp_scale, row_warp_offset) = if config.enable_warp {
         let warp_x_factor = 1.0 + (dc2_y * (0.3 * config.warp_x));
-        // u' = (u - 0.5) * factor + 0.5
-        // u' = u * factor - 0.5 * factor + 0.5
         (warp_x_factor, 0.5 - 0.5 * warp_x_factor)
     } else {
         (1.0, 0.0)
     };
 
-    // Y-warp depends on X, so we calculate the constant part of the Y-warp equation
-    let y_warp_base = if config.enable_warp {
-         v_norm - 0.5
-    } else {
-         0.0
-    };
+    // Y-warp constant part
+    let y_warp_base = if config.enable_warp { v_norm - 0.5 } else { 0.0 };
 
     // Scanline intensity for this row
     let src_y_pos = v_norm * src_h_f;
     let scan_idx = (src_y_pos.fract() * 100.0) as usize;
-    let scan_val = unsafe { *scan_lut.get_unchecked(scan_idx.min(100)) };
+    let scan_val = scan_lut[scan_idx.min(100)];
 
-    for x in 0..out_w {
-        let u_norm = x as f32 / out_w_f;
+    let enable_warp = config.enable_warp;
 
-        // Optimized Warp Logic
-        let (warped_u, warped_v) = if config.enable_warp {
-            // Apply pre-calculated linear X-warp
+    // Cycling shadow-mask index instead of `x % 6` per pixel.
+    let mut mask_idx = 0usize;
+
+    for (out_px, &[u_norm, ywarp_factor]) in row.chunks_exact_mut(4).zip(col_lut) {
+        let mask = mask_lut[mask_idx];
+        mask_idx += 1;
+        if mask_idx == 6 {
+            mask_idx = 0;
+        }
+
+        // Warp (the x-dependent factor comes precomputed from col_lut)
+        let (warped_u, warped_v) = if enable_warp {
             let wu = u_norm * row_warp_scale + row_warp_offset;
-
-            // Apply X-dependent Y-warp
-            // wv = (v - 0.5) * (1.0 + dc2_x * coeff) + 0.5
-            let dc_x = (u_norm - 0.5).abs();
-            let dc2_x = dc_x * dc_x;
-            let wv = y_warp_base * (1.0 + (dc2_x * (0.4 * config.warp_y))) + 0.5;
-
+            let wv = y_warp_base * ywarp_factor + 0.5;
             (wu, wv)
         } else {
             (u_norm, v_norm)
         };
 
-        // Bounds check
+        // Out-of-tube pixels are explicitly transparent black so the output
+        // buffer never needs pre-zeroing (required for buffer reuse).
         if warped_u < 0.0 || warped_u >= 1.0 || warped_v < 0.0 || warped_v >= 1.0 {
-            continue; // Pixel remains 0 (black)
+            out_px.copy_from_slice(&[0, 0, 0, 0]);
+            continue;
         }
 
         let src_x = warped_u * src_w_f;
@@ -197,11 +243,10 @@ fn crt_render_row(
 
         let x0 = src_x as usize;
         let y0 = src_y as usize;
-        // Use bitwise min to avoid branches if possible, or simple min
         let x1 = (x0 + 1).min(src_w - 1);
         let y1 = (y0 + 1).min(src_h - 1);
 
-        // Bilinear weights (fixed point optimization opportunity, but FPU is fast enough here with simple math)
+        // Bilinear weights
         let wx = src_x - x0 as f32;
         let wy = src_y - y0 as f32;
         let iwx = 1.0 - wx;
@@ -210,72 +255,70 @@ fn crt_render_row(
         let row0_idx = y0 * src_w;
         let row1_idx = y1 * src_w;
 
-        // Pointer arithmetic for faster access
-        // SAFETY: Bounds checked by warp logic and clamping above
+        // SAFETY: x0/x1 < src_w and y0/y1 < src_h by the warp bounds check and
+        // the explicit clamping above; input length asserted by the caller.
         let (p00, p10, p01, p11) = unsafe {
-             let s = input.as_ptr();
-             (
+            let s = input.as_ptr();
+            (
                 s.add((row0_idx + x0) * 4),
                 s.add((row0_idx + x1) * 4),
                 s.add((row1_idx + x0) * 4),
-                s.add((row1_idx + x1) * 4)
-             )
+                s.add((row1_idx + x1) * 4),
+            )
         };
 
-        // Calculate Alpha first to early exit
+        // Alpha first for the early exit
         let a_f = unsafe {
-            (*p00.add(3) as f32 * iwx + *p10.add(3) as f32 * wx) * iwy +
-            (*p01.add(3) as f32 * iwx + *p11.add(3) as f32 * wx) * wy
+            (*p00.add(3) as f32 * iwx + *p10.add(3) as f32 * wx) * iwy
+                + (*p01.add(3) as f32 * iwx + *p11.add(3) as f32 * wx) * wy
         };
 
-        if a_f < 1.0 { continue; }
-
-        // Color Interpolation
-        // We do the multiplication in floats, but avoid powi(2) for gamma expansion.
-        // Approximating Gamma 2.0 expansion as simple squaring is fast and accurate enough for CRT effects.
+        if a_f < 1.0 {
+            out_px.copy_from_slice(&[0, 0, 0, 0]);
+            continue;
+        }
 
         let mut r = unsafe {
-            ((*p00 as f32 * iwx + *p10 as f32 * wx) * iwy +
-             (*p01 as f32 * iwx + *p11 as f32 * wx) * wy) / 255.0
+            ((*p00 as f32 * iwx + *p10 as f32 * wx) * iwy
+                + (*p01 as f32 * iwx + *p11 as f32 * wx) * wy)
+                / 255.0
         };
         let mut g = unsafe {
-            ((*p00.add(1) as f32 * iwx + *p10.add(1) as f32 * wx) * iwy +
-             (*p01.add(1) as f32 * iwx + *p11.add(1) as f32 * wx) * wy) / 255.0
+            ((*p00.add(1) as f32 * iwx + *p10.add(1) as f32 * wx) * iwy
+                + (*p01.add(1) as f32 * iwx + *p11.add(1) as f32 * wx) * wy)
+                / 255.0
         };
         let mut b = unsafe {
-            ((*p00.add(2) as f32 * iwx + *p10.add(2) as f32 * wx) * iwy +
-             (*p01.add(2) as f32 * iwx + *p11.add(2) as f32 * wx) * wy) / 255.0
+            ((*p00.add(2) as f32 * iwx + *p10.add(2) as f32 * wx) * iwy
+                + (*p01.add(2) as f32 * iwx + *p11.add(2) as f32 * wx) * wy)
+                / 255.0
         };
 
-        // Apply Gamma Expansion (Approximate sRGB -> Linear with x^2)
+        // Gamma expansion (approximate sRGB -> linear with x^2)
         r *= r;
         g *= g;
         b *= b;
 
-        // Bloom Estimation
+        // Bloom estimation
         let luma = r * 0.299 + g * 0.587 + b * 0.114;
         let bloom = luma * 0.7;
 
-        // Apply Scanline
+        // Scanline
         r *= scan_val;
         g *= scan_val;
         b *= scan_val;
 
-        // Apply Mask & Bloom
-        let mask = unsafe { mask_lut.get_unchecked(x % 6) };
+        // Mask & bloom
         let ibloom = 1.0 - bloom;
 
-        r = r * (mask[0] * ibloom + bloom);
-        g = g * (mask[1] * ibloom + bloom);
-        b = b * (mask[2] * ibloom + bloom);
+        r *= mask[0] * ibloom + bloom;
+        g *= mask[1] * ibloom + bloom;
+        b *= mask[2] * ibloom + bloom;
 
-        // Output with Gamma Correction LUT (Linear -> sRGB)
-        let out_idx = x * 4;
-        unsafe {
-            *row.get_unchecked_mut(out_idx)     = *gamma_lut.get_unchecked((r * 255.0) as usize & 0xFF);
-            *row.get_unchecked_mut(out_idx + 1) = *gamma_lut.get_unchecked((g * 255.0) as usize & 0xFF);
-            *row.get_unchecked_mut(out_idx + 2) = *gamma_lut.get_unchecked((b * 255.0) as usize & 0xFF);
-            *row.get_unchecked_mut(out_idx + 3) = 255;
-        }
+        // Output with gamma correction LUT (linear -> sRGB)
+        out_px[0] = gamma_lut[(r * 255.0) as usize & 0xFF];
+        out_px[1] = gamma_lut[(g * 255.0) as usize & 0xFF];
+        out_px[2] = gamma_lut[(b * 255.0) as usize & 0xFF];
+        out_px[3] = 255;
     }
 }
