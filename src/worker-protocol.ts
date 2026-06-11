@@ -2,9 +2,9 @@
  * Shared message protocol for the render worker and its client.
  */
 
-import type { CrtOptions, HexOptions, XbrzOptions } from './types.js';
+import type { CrtOptions, CutOptions, HexOptions, XbrzOptions } from './types.js';
 
-export type EffectName = 'crt' | 'hex' | 'xbrz';
+export type EffectName = 'crt' | 'hex' | 'xbrz' | 'cut';
 
 /**
  * Desired result form.
@@ -19,6 +19,7 @@ export interface EffectOptionsMap {
   crt: CrtOptions;
   hex: HexOptions;
   xbrz: XbrzOptions;
+  cut: CutOptions;
 }
 
 /** main thread -> worker */
@@ -29,7 +30,7 @@ export type WorkerRequest =
       effect: EffectName;
       width: number;
       height: number;
-      options: CrtOptions | HexOptions | XbrzOptions;
+      options: CrtOptions | HexOptions | XbrzOptions | CutOptions;
       /** Desired output form. Defaults to 'pixels'. */
       output?: WorkerOutputKind;
       /** RGBA bytes, transferred to the worker (exactly one of buffer/bitmap is set) */

@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
 
 mod crt;
+mod cut;
 mod hex;
 mod xbrz;
 
@@ -272,6 +273,74 @@ pub fn xbrz_upscale_config(
     })
 }
 
+
+// ============================================================================
+// CUT3 Functions (Cheap Upscaling Triangulation)
+// ============================================================================
+
+/// CUT3 upscale with default config
+#[wasm_bindgen]
+pub fn cut_upscale(data: &[u8], width: u32, height: u32, scale: u32) -> UpscaleResult {
+    cut_upscale_config(
+        data, width, height, scale,
+        true, 0.0, 0.25, 0.0, 0.75, 0.5,
+        false, true, 1.0, 0.25, 4,
+    )
+}
+
+/// CUT3 upscale with full config
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn cut_upscale_config(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    scale: u32,
+    use_dynamic_blend: bool,
+    blend_min_contrast_edge: f32,
+    blend_max_contrast_edge: f32,
+    blend_min_sharpness: f32,
+    blend_max_sharpness: f32,
+    static_blend_sharpness: f32,
+    edge_use_fast_luma: bool,
+    soft_edges_sharpening: bool,
+    soft_edges_sharpening_amount: f32,
+    hard_edges_search_max_error: f32,
+    hard_edges_search_max_distance: u32,
+) -> UpscaleResult {
+    let config = cut::CutConfig {
+        use_dynamic_blend,
+        blend_min_contrast_edge,
+        blend_max_contrast_edge,
+        blend_min_sharpness,
+        blend_max_sharpness,
+        static_blend_sharpness,
+        edge_use_fast_luma,
+        soft_edges_sharpening,
+        soft_edges_sharpening_amount,
+        hard_edges_search_max_error,
+        hard_edges_search_max_distance,
+    };
+
+    // Mirror the clamp inside cut_upscale_into so the reported dimensions
+    // and the buffer size always agree with what the renderer produces.
+    let scale = scale.clamp(1, 32);
+    let out_w = width * scale;
+    let out_h = height * scale;
+    let required = (out_w * out_h * 4) as usize;
+
+    with_buffer(required, out_w, out_h, |out| {
+        cut::cut_upscale_into(
+            data,
+            width as usize,
+            height as usize,
+            scale as usize,
+            &config,
+            out,
+        );
+    })
+}
+
 // ============================================================================
 // Native benchmark hooks (not part of the wasm API)
 // ============================================================================
@@ -299,5 +368,11 @@ pub mod bench_api {
     }
     pub fn xbrz_into(data: &[u8], w: usize, h: usize, scale: usize, out: &mut [u8]) {
         crate::xbrz::xbrz_upscale_into(data, w, h, scale, 30.0, 4.0, 3.6, 2.2, out)
+    }
+    pub fn cut(data: &[u8], w: usize, h: usize, scale: usize) -> Vec<u8> {
+        crate::cut::cut_upscale(data, w, h, scale, &crate::cut::CutConfig::default())
+    }
+    pub fn cut_into(data: &[u8], w: usize, h: usize, scale: usize, out: &mut [u8]) {
+        crate::cut::cut_upscale_into(data, w, h, scale, &crate::cut::CutConfig::default(), out)
     }
 }

@@ -17,6 +17,7 @@
 import { CrtGpuRenderer } from './crt-gpu.js';
 import { HexGpuRenderer } from './hex-gpu.js';
 import { XbrzGpuRenderer } from './xbrz-gpu.js';
+import { CutGpuRenderer } from './cut-gpu.js';
 import { isImageBitmap } from './gpu-context.js';
 import type { ImageOutput, RenderSource } from './types.js';
 import type { WorkerRequest, WorkerResponse } from './worker-protocol.js';
@@ -27,6 +28,7 @@ const ctx = self as unknown as DedicatedWorkerGlobalScope;
 let crt: CrtGpuRenderer | null = null;
 let hex: HexGpuRenderer | null = null;
 let xbrz: XbrzGpuRenderer | null = null;
+let cut: CutGpuRenderer | null = null;
 
 function reply(message: WorkerResponse, transfer: Transferable[]): void {
   ctx.postMessage(message, transfer);
@@ -64,6 +66,10 @@ async function handleRender(req: Extract<WorkerRequest, { type: 'render' }>): Pr
           xbrz ??= XbrzGpuRenderer.create();
           bitmap = await xbrz.renderToBitmap(input, req.options);
           break;
+        case 'cut':
+          cut ??= CutGpuRenderer.create();
+          bitmap = await cut.renderToBitmap(input, req.options);
+          break;
         default:
           throw new Error(`Unknown effect: ${(req as { effect: string }).effect}`);
       }
@@ -85,6 +91,10 @@ async function handleRender(req: Extract<WorkerRequest, { type: 'render' }>): Pr
         case 'xbrz':
           xbrz ??= XbrzGpuRenderer.create();
           out = await xbrz.renderAsync(input, req.options);
+          break;
+        case 'cut':
+          cut ??= CutGpuRenderer.create();
+          out = await cut.renderAsync(input, req.options);
           break;
         default:
           throw new Error(`Unknown effect: ${(req as { effect: string }).effect}`);
@@ -111,7 +121,8 @@ function disposeAll(): void {
   crt?.dispose();
   hex?.dispose();
   xbrz?.dispose();
-  crt = hex = xbrz = null;
+  cut?.dispose();
+  crt = hex = xbrz = cut = null;
 }
 
 ctx.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {

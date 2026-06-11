@@ -72,5 +72,13 @@ export class WasmRenderer {
         const result = this.wasm.xbrz_upscale_config(data, width, height, scale, options.equalColorTolerance ?? 30, options.centerDirectionBias ?? 4.0, options.dominantDirectionThreshold ?? 3.6, options.steepDirectionThreshold ?? 2.2);
         return readWasmOutput(this.wasm, result);
     }
+    /** Render CUT3 (Cheap Upscaling Triangulation) upscale */
+    renderCut(input, options = {}) {
+        const data = input instanceof ImageData ? new Uint8Array(input.data.buffer) : input.data;
+        const { width, height } = input;
+        const scale = Math.min(32, Math.max(1, options.scale ?? 3));
+        const result = this.wasm.cut_upscale_config(data, width, height, scale, options.useDynamicBlend !== false, options.blendMinContrastEdge ?? 0.0, options.blendMaxContrastEdge ?? 0.25, options.blendMinSharpness ?? 0.0, options.blendMaxSharpness ?? 0.75, options.staticBlendSharpness ?? 0.5, options.edgeUseFastLuma === true, options.softEdgesSharpening !== false, options.softEdgesSharpeningAmount ?? 1.0, options.hardEdgesSearchMaxError ?? 0.25, options.hardEdgesSearchMaxDistance ?? 4);
+        return readWasmOutput(this.wasm, result);
+    }
 }
 //# sourceMappingURL=wasm-wrapper.js.map

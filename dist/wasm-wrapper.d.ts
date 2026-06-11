@@ -4,7 +4,7 @@
  * Provides TypeScript type definitions and helper functions
  * for the WebAssembly module.
  */
-import type { CrtOptions, HexOptions, HexOrientation, ImageOutput, XbrzOptions } from './types.js';
+import type { CrtOptions, CutOptions, HexOptions, HexOrientation, ImageOutput, XbrzOptions } from './types.js';
 /** WASM upscale result structure */
 export interface WasmUpscaleResult {
     /** Pointer to output data in WASM memory */
@@ -34,6 +34,10 @@ export interface RenderArtWasm {
     xbrz_upscale(data: Uint8Array, width: number, height: number, scale: number): WasmUpscaleResult;
     /** xBRZ upscale with full config */
     xbrz_upscale_config(data: Uint8Array, width: number, height: number, scale: number, equal_color_tolerance: number, center_direction_bias: number, dominant_direction_threshold: number, steep_direction_threshold: number): WasmUpscaleResult;
+    /** CUT3 upscale with default config */
+    cut_upscale(data: Uint8Array, width: number, height: number, scale: number): WasmUpscaleResult;
+    /** CUT3 upscale with full config */
+    cut_upscale_config(data: Uint8Array, width: number, height: number, scale: number, use_dynamic_blend: boolean, blend_min_contrast_edge: number, blend_max_contrast_edge: number, blend_min_sharpness: number, blend_max_sharpness: number, static_blend_sharpness: number, edge_use_fast_luma: boolean, soft_edges_sharpening: boolean, soft_edges_sharpening_amount: number, hard_edges_search_max_error: number, hard_edges_search_max_distance: number): WasmUpscaleResult;
 }
 /** Helper to read WASM output into ImageOutput */
 export declare function readWasmOutput(wasm: RenderArtWasm, result: WasmUpscaleResult): ImageOutput;
@@ -67,5 +71,11 @@ export declare class WasmRenderer {
         width: number;
         height: number;
     }, options?: XbrzOptions): ImageOutput;
+    /** Render CUT3 (Cheap Upscaling Triangulation) upscale */
+    renderCut(input: ImageData | {
+        data: Uint8Array;
+        width: number;
+        height: number;
+    }, options?: CutOptions): ImageOutput;
 }
 //# sourceMappingURL=wasm-wrapper.d.ts.map

@@ -36,6 +36,16 @@ export function crt_upscale(data: Uint8Array, width: number, height: number, sca
 export function crt_upscale_config(data: Uint8Array, width: number, height: number, scale: number, warp_x: number, warp_y: number, scan_hardness: number, scan_opacity: number, mask_opacity: number, enable_warp: boolean, enable_scanlines: boolean, enable_mask: boolean): UpscaleResult;
 
 /**
+ * CUT3 upscale with default config
+ */
+export function cut_upscale(data: Uint8Array, width: number, height: number, scale: number): UpscaleResult;
+
+/**
+ * CUT3 upscale with full config
+ */
+export function cut_upscale_config(data: Uint8Array, width: number, height: number, scale: number, use_dynamic_blend: boolean, blend_min_contrast_edge: number, blend_max_contrast_edge: number, blend_min_sharpness: number, blend_max_sharpness: number, static_blend_sharpness: number, edge_use_fast_luma: boolean, soft_edges_sharpening: boolean, soft_edges_sharpening_amount: number, hard_edges_search_max_error: number, hard_edges_search_max_distance: number): UpscaleResult;
+
+/**
  * Get WASM memory for reading output buffers
  */
 export function get_memory(): any;
@@ -81,6 +91,8 @@ export interface InitOutput {
     readonly __wbg_upscaleresult_free: (a: number, b: number) => void;
     readonly crt_upscale: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly crt_upscale_config: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => number;
+    readonly cut_upscale: (a: number, b: number, c: number, d: number, e: number) => number;
+    readonly cut_upscale_config: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number) => number;
     readonly hex_get_dimensions: (a: number, b: number, c: number, d: number) => number;
     readonly hex_upscale: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly hex_upscale_config: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => number;

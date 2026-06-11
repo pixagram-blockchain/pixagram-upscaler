@@ -5,7 +5,7 @@
  * for the WebAssembly module.
  */
 
-import type { CrtOptions, HexOptions, HexOrientation, ImageOutput, XbrzOptions } from './types.js';
+import type { CrtOptions, CutOptions, HexOptions, HexOrientation, ImageOutput, XbrzOptions } from './types.js';
 
 /** WASM upscale result structure */
 export interface WasmUpscaleResult {
@@ -75,6 +75,28 @@ export interface RenderArtWasm {
     center_direction_bias: number,
     dominant_direction_threshold: number,
     steep_direction_threshold: number,
+  ): WasmUpscaleResult;
+
+  /** CUT3 upscale with default config */
+  cut_upscale(data: Uint8Array, width: number, height: number, scale: number): WasmUpscaleResult;
+
+  /** CUT3 upscale with full config */
+  cut_upscale_config(
+    data: Uint8Array,
+    width: number,
+    height: number,
+    scale: number,
+    use_dynamic_blend: boolean,
+    blend_min_contrast_edge: number,
+    blend_max_contrast_edge: number,
+    blend_min_sharpness: number,
+    blend_max_sharpness: number,
+    static_blend_sharpness: number,
+    edge_use_fast_luma: boolean,
+    soft_edges_sharpening: boolean,
+    soft_edges_sharpening_amount: number,
+    hard_edges_search_max_error: number,
+    hard_edges_search_max_distance: number,
   ): WasmUpscaleResult;
 }
 
@@ -190,6 +212,33 @@ export class WasmRenderer {
       options.steepDirectionThreshold ?? 2.2,
     );
     
+    return readWasmOutput(this.wasm, result);
+  }
+
+  /** Render CUT3 (Cheap Upscaling Triangulation) upscale */
+  renderCut(input: ImageData | { data: Uint8Array; width: number; height: number }, options: CutOptions = {}): ImageOutput {
+    const data = input instanceof ImageData ? new Uint8Array(input.data.buffer) : input.data;
+    const { width, height } = input;
+    const scale = Math.min(32, Math.max(1, options.scale ?? 3));
+
+    const result = this.wasm.cut_upscale_config(
+      data,
+      width,
+      height,
+      scale,
+      options.useDynamicBlend !== false,
+      options.blendMinContrastEdge ?? 0.0,
+      options.blendMaxContrastEdge ?? 0.25,
+      options.blendMinSharpness ?? 0.0,
+      options.blendMaxSharpness ?? 0.75,
+      options.staticBlendSharpness ?? 0.5,
+      options.edgeUseFastLuma === true,
+      options.softEdgesSharpening !== false,
+      options.softEdgesSharpeningAmount ?? 1.0,
+      options.hardEdgesSearchMaxError ?? 0.25,
+      options.hardEdgesSearchMaxDistance ?? 4,
+    );
+
     return readWasmOutput(this.wasm, result);
   }
 }

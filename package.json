@@ -1,6 +1,6 @@
 {
   "name": "@pixagram/upscaler",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "High-performance pixel art rendering engines with WebGL2 GPU acceleration and WASM support",
   "keywords": [
     "pixel-art",

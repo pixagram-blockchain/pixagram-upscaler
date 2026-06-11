@@ -16,12 +16,14 @@
 import { CrtGpuRenderer } from './crt-gpu.js';
 import { HexGpuRenderer } from './hex-gpu.js';
 import { XbrzGpuRenderer } from './xbrz-gpu.js';
+import { CutGpuRenderer } from './cut-gpu.js';
 import { isImageBitmap } from './gpu-context.js';
 // Avoid DOM/WebWorker `self` typing ambiguity when both libs are enabled.
 const ctx = self;
 let crt = null;
 let hex = null;
 let xbrz = null;
+let cut = null;
 function reply(message, transfer) {
     ctx.postMessage(message, transfer);
 }
@@ -58,6 +60,10 @@ async function handleRender(req) {
                     xbrz ??= XbrzGpuRenderer.create();
                     bitmap = await xbrz.renderToBitmap(input, req.options);
                     break;
+                case 'cut':
+                    cut ??= CutGpuRenderer.create();
+                    bitmap = await cut.renderToBitmap(input, req.options);
+                    break;
                 default:
                     throw new Error(`Unknown effect: ${req.effect}`);
             }
@@ -77,6 +83,10 @@ async function handleRender(req) {
                 case 'xbrz':
                     xbrz ??= XbrzGpuRenderer.create();
                     out = await xbrz.renderAsync(input, req.options);
+                    break;
+                case 'cut':
+                    cut ??= CutGpuRenderer.create();
+                    out = await cut.renderAsync(input, req.options);
                     break;
                 default:
                     throw new Error(`Unknown effect: ${req.effect}`);
@@ -100,7 +110,8 @@ function disposeAll() {
     crt?.dispose();
     hex?.dispose();
     xbrz?.dispose();
-    crt = hex = xbrz = null;
+    cut?.dispose();
+    crt = hex = xbrz = cut = null;
 }
 ctx.addEventListener('message', (event) => {
     const req = event.data;

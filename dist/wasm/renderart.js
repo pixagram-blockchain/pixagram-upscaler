@@ -163,6 +163,47 @@ export function crt_upscale_config(data, width, height, scale, warp_x, warp_y, s
 }
 
 /**
+ * CUT3 upscale with default config
+ * @param {Uint8Array} data
+ * @param {number} width
+ * @param {number} height
+ * @param {number} scale
+ * @returns {UpscaleResult}
+ */
+export function cut_upscale(data, width, height, scale) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.cut_upscale(ptr0, len0, width, height, scale);
+    return UpscaleResult.__wrap(ret);
+}
+
+/**
+ * CUT3 upscale with full config
+ * @param {Uint8Array} data
+ * @param {number} width
+ * @param {number} height
+ * @param {number} scale
+ * @param {boolean} use_dynamic_blend
+ * @param {number} blend_min_contrast_edge
+ * @param {number} blend_max_contrast_edge
+ * @param {number} blend_min_sharpness
+ * @param {number} blend_max_sharpness
+ * @param {number} static_blend_sharpness
+ * @param {boolean} edge_use_fast_luma
+ * @param {boolean} soft_edges_sharpening
+ * @param {number} soft_edges_sharpening_amount
+ * @param {number} hard_edges_search_max_error
+ * @param {number} hard_edges_search_max_distance
+ * @returns {UpscaleResult}
+ */
+export function cut_upscale_config(data, width, height, scale, use_dynamic_blend, blend_min_contrast_edge, blend_max_contrast_edge, blend_min_sharpness, blend_max_sharpness, static_blend_sharpness, edge_use_fast_luma, soft_edges_sharpening, soft_edges_sharpening_amount, hard_edges_search_max_error, hard_edges_search_max_distance) {
+    const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.cut_upscale_config(ptr0, len0, width, height, scale, use_dynamic_blend, blend_min_contrast_edge, blend_max_contrast_edge, blend_min_sharpness, blend_max_sharpness, static_blend_sharpness, edge_use_fast_luma, soft_edges_sharpening, soft_edges_sharpening_amount, hard_edges_search_max_error, hard_edges_search_max_distance);
+    return UpscaleResult.__wrap(ret);
+}
+
+/**
  * Get WASM memory for reading output buffers
  * @returns {any}
  */

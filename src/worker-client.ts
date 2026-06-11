@@ -20,7 +20,7 @@
  *   r.dispose();
  */
 
-import type { CrtOptions, HexOptions, ImageOutput, RenderSource, XbrzOptions } from './types.js';
+import type { CrtOptions, CutOptions, HexOptions, ImageOutput, RenderSource, XbrzOptions } from './types.js';
 import { isImageBitmap } from './gpu-context.js';
 import type { EffectName, WorkerOutputKind, WorkerRequest, WorkerResponse } from './worker-protocol.js';
 
@@ -127,6 +127,11 @@ export class WorkerRenderer {
     return this.run('xbrz', input, options, 'pixels') as Promise<ImageOutput>;
   }
 
+  /** Render the CUT3 upscaler on the worker thread. */
+  cut(input: RenderSource, options: CutOptions = {}): Promise<ImageOutput> {
+    return this.run('cut', input, options, 'pixels') as Promise<ImageOutput>;
+  }
+
   /** CRT effect with ImageBitmap output (no GPU->CPU readback). */
   crtToBitmap(input: RenderSource, options: CrtOptions = {}): Promise<ImageBitmap> {
     return this.run('crt', input, options, 'bitmap') as Promise<ImageBitmap>;
@@ -140,6 +145,11 @@ export class WorkerRenderer {
   /** xBRZ upscale with ImageBitmap output (no GPU->CPU readback). */
   xbrzToBitmap(input: RenderSource, options: XbrzOptions = {}): Promise<ImageBitmap> {
     return this.run('xbrz', input, options, 'bitmap') as Promise<ImageBitmap>;
+  }
+
+  /** Render CUT3 to an ImageBitmap (zero GPU->CPU readback). */
+  cutToBitmap(input: RenderSource, options: CutOptions = {}): Promise<ImageBitmap> {
+    return this.run('cut', input, options, 'bitmap') as Promise<ImageBitmap>;
   }
 
   /** Terminate the worker and reject any in-flight requests. */

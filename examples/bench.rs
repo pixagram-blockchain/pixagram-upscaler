@@ -70,6 +70,11 @@ fn bench_into(w: usize, h: usize, smooth: &[u8], pix: &[u8]) {
         api::xbrz_into(pix, w, h, 2, &mut xbuf2);
         xbuf2.iter().map(|&b| b as u64).sum()
     });
+    let mut cbuf = vec![0u8; w * 4 * h * 4 * 4];
+    time("cut3 256x256 x4 (into)", 20, || {
+        api::cut_into(pix, w, h, 4, &mut cbuf);
+        cbuf.iter().map(|&b| b as u64).sum()
+    });
 }
 
 fn main() {
@@ -88,6 +93,9 @@ fn main() {
     });
     time("xbrz 256x256 x2 (default)", 20, || {
         api::xbrz(&pix, w, h, 2).iter().map(|&b| b as u64).sum()
+    });
+    time("cut3 256x256 x4 (default)", 20, || {
+        api::cut(&pix, w, h, 4).iter().map(|&b| b as u64).sum()
     });
 
     bench_into(w, h, &smooth, &pix);

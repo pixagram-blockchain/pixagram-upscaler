@@ -107,3 +107,58 @@ multiplication, precomputed bilinear weights) would yield roughly another
 Regenerating goldens after an intentional behavior change:
 `GOLDEN_CAPTURE=1 cargo test golden -- --nocapture`, then paste the printed
 constants into `golden_tests.rs`.
+
+## CUT3 — Cheap Upscaling Triangulation (new effect)
+
+The package now ships CUT3, a three-pass content-adaptive upscaler ported
+from "Cheap Upscaling Triangulation" by Filippo Scognamiglio
+(https://github.com/Swordfish90/cheap-upscaling-triangulation). Pass 0
+triangulates the luma plane of every 2×2 quad and measures soft
+(anti-aliased) edges; pass 1 walks along hard edges up to a configurable
+distance to derive per-side blend weights; pass 2 interpolates the output
+inside each quad, splitting diagonal quads into two triangles. The result
+keeps axis-aligned edges pixel-sharp while turning diagonal staircases into
+clean slopes, and re-sharpens anti-aliased content.
+
+**Licensing — important.** The upstream project is GPL-3.0; the ported
+files (`src/cut-shaders.ts`, `src/cut-gpu.ts`, `src/wasm/cut.rs`) are
+derivative works and carry the GPL-3.0 header. This package's manifest
+currently declares MIT, and MIT and GPL-3.0 cannot both apply to the
+combined distributed work: shipping CUT3 means the package as distributed
+must comply with GPL-3.0 (or the CUT3 files must be split into a separate,
+GPL-licensed optional package, or a different license obtained from the
+author). This needs a deliberate decision before the next publish.
+
+Both implementations land behind the same API as the other effects:
+`CutGpuRenderer` / `createRenderer.cut()` with `render`, `renderAsync`,
+`renderToBitmap` on the GPU side (three WebGL2 programs, two renderer-owned
+input-sized RGBA8 intermediates, final pass through the shared render
+target so context-loss recovery, the async fence readback and the zero-copy
+ImageBitmap path all work unchanged), `WorkerRenderer.cut` /
+`cutToBitmap` off the main thread, and `cut_upscale` /
+`cut_upscale_config` in the WASM module with `WasmRenderer.renderCut`.
+Options mirror the upstream `#define` block (defaults identical to the
+upstream demo); both sides apply the same parameter sanitation so a given
+option set means the same thing on GPU and CPU.
+
+Port notes worth knowing. Intermediate passes are stored in RGBA8 exactly
+as upstream's render targets, including on the CPU (quantized u8 buffers),
+because the algorithm's bit-packing nudges (+1/512, +0.125) are tuned for
+8-bit storage. The GLSL's formally-undefined partially-assigned
+`edgesWeights` array is explicitly zero-filled (the behavior the algorithm
+relies on). One inherited quirk is documented and asserted in
+`cut.rs` tests: the packed code point (8,0) lands exactly on the 127.5
+unorm8 rounding tie and decodes with a 1/12 error on one edge weight —
+true of the original on any GPU as well. The CPU port indexes passes 0/1
+with integers (proven equivalent to the shader coordinate math for
+dimensions ≤ 16384) and replicates the float coordinate math in pass 2,
+with a per-quad cache so flag parsing and quad fetches amortize across the
+scale² output pixels of each source cell (103.8 → 77.2 ms at 256² ×4,
+byte-identical output per the golden tests).
+
+CPU cost on the bench machine: cut3 256×256 ×4 = 77.2 ms (vs xBRZ ×4
+10.8 ms — CUT3 does roughly an order of magnitude more arithmetic per
+output pixel; the GPU path is the intended interactive route). The CUT
+golden hashes are self-captured from this port (there is no pre-existing
+CPU reference), locking behavior for future refactors. The six GPU shaders
+validate and link clean under glslangValidator as GLSL ES 3.00.

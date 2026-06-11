@@ -19,7 +19,7 @@
  *   canvasCtx.transferFromImageBitmap?.(bmp) ?? canvasCtx.drawImage(bmp, 0, 0);
  *   r.dispose();
  */
-import type { CrtOptions, HexOptions, ImageOutput, RenderSource, XbrzOptions } from './types.js';
+import type { CrtOptions, CutOptions, HexOptions, ImageOutput, RenderSource, XbrzOptions } from './types.js';
 export interface WorkerRendererOptions {
     /**
      * Provide a custom Worker (e.g. when your bundler needs a specific worker
@@ -41,12 +41,16 @@ export declare class WorkerRenderer {
     hex(input: RenderSource, options?: HexOptions): Promise<ImageOutput>;
     /** Render the xBRZ upscale on the worker thread. */
     xbrz(input: RenderSource, options?: XbrzOptions): Promise<ImageOutput>;
+    /** Render the CUT3 upscaler on the worker thread. */
+    cut(input: RenderSource, options?: CutOptions): Promise<ImageOutput>;
     /** CRT effect with ImageBitmap output (no GPU->CPU readback). */
     crtToBitmap(input: RenderSource, options?: CrtOptions): Promise<ImageBitmap>;
     /** Hexagonal effect with ImageBitmap output (no GPU->CPU readback). */
     hexToBitmap(input: RenderSource, options?: HexOptions): Promise<ImageBitmap>;
     /** xBRZ upscale with ImageBitmap output (no GPU->CPU readback). */
     xbrzToBitmap(input: RenderSource, options?: XbrzOptions): Promise<ImageBitmap>;
+    /** Render CUT3 to an ImageBitmap (zero GPU->CPU readback). */
+    cutToBitmap(input: RenderSource, options?: CutOptions): Promise<ImageBitmap>;
     /** Terminate the worker and reject any in-flight requests. */
     dispose(): void;
 }

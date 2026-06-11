@@ -90,4 +90,39 @@ export interface XbrzOptions {
     /** Steep direction threshold (default: 2.2) */
     steepDirectionThreshold?: number;
 }
+/**
+ * CUT3 (Cheap Upscaling Triangulation) options.
+ *
+ * Defaults match the upstream demo configuration. The algorithm is a
+ * content-adaptive interpolating upscaler: hard edges are triangulated,
+ * anti-aliased (soft) edges are re-sharpened. Output alpha is always 255
+ * (the algorithm operates on RGB, like the original shaders).
+ */
+export interface CutOptions {
+    /** Output scale factor (1-32, default: 3). 1 returns a copy. */
+    scale?: number;
+    /** Blend sharpness follows local contrast (default: true) */
+    useDynamicBlend?: boolean;
+    /** Contrast at which sharpness starts increasing (0-1, default: 0.0) */
+    blendMinContrastEdge?: number;
+    /** Contrast at which sharpness stops increasing (0-1, default: 0.25) */
+    blendMaxContrastEdge?: number;
+    /** Minimum sharpness level (0-1, default: 0.0) */
+    blendMinSharpness?: number;
+    /** Maximum sharpness level (0-1, default: 0.75) */
+    blendMaxSharpness?: number;
+    /** Sharpness used when dynamic blending is off (0-1, default: 0.5) */
+    staticBlendSharpness?: number;
+    /** Use green channel as quick luma in edge detection (default: false) */
+    edgeUseFastLuma?: boolean;
+    /** Sharpen edges wider than one pixel (default: true) */
+    softEdgesSharpening?: boolean;
+    /** Max size reduction of soft-edge pixels (0-1, default: 1.0) */
+    softEdgesSharpeningAmount?: number;
+    /** Max relative error for a hard edge (0-1, default: 0.25) */
+    hardEdgesSearchMaxError?: number;
+    /** Edge search distance in texels (1-16, default: 4). Higher values
+     *  resolve shallower angles at a linear cost. */
+    hardEdgesSearchMaxDistance?: number;
+}
 //# sourceMappingURL=types.d.ts.map

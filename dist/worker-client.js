@@ -101,6 +101,10 @@ export class WorkerRenderer {
     xbrz(input, options = {}) {
         return this.run('xbrz', input, options, 'pixels');
     }
+    /** Render the CUT3 upscaler on the worker thread. */
+    cut(input, options = {}) {
+        return this.run('cut', input, options, 'pixels');
+    }
     /** CRT effect with ImageBitmap output (no GPU->CPU readback). */
     crtToBitmap(input, options = {}) {
         return this.run('crt', input, options, 'bitmap');
@@ -112,6 +116,10 @@ export class WorkerRenderer {
     /** xBRZ upscale with ImageBitmap output (no GPU->CPU readback). */
     xbrzToBitmap(input, options = {}) {
         return this.run('xbrz', input, options, 'bitmap');
+    }
+    /** Render CUT3 to an ImageBitmap (zero GPU->CPU readback). */
+    cutToBitmap(input, options = {}) {
+        return this.run('cut', input, options, 'bitmap');
     }
     /** Terminate the worker and reject any in-flight requests. */
     dispose() {
