@@ -1,0 +1,93 @@
+{
+  "name": "@pixagram/upscaler",
+  "version": "0.4.0",
+  "description": "High-performance pixel art rendering engines with WebGL2 GPU acceleration and SIMD WebAssembly support",
+  "keywords": [
+    "pixel-art",
+    "upscaling",
+    "xbrz",
+    "crt",
+    "hexagonal",
+    "webgl",
+    "wasm",
+    "image-processing",
+    "retro",
+    "gamedev"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pixagram-blockchain/pixagram-upscaler"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./crt": {
+      "import": "./dist/crt-gpu.js",
+      "types": "./dist/crt-gpu.d.ts"
+    },
+    "./hex": {
+      "import": "./dist/hex-gpu.js",
+      "types": "./dist/hex-gpu.d.ts"
+    },
+    "./xbrz": {
+      "import": "./dist/xbrz-gpu.js",
+      "types": "./dist/xbrz-gpu.d.ts"
+    },
+    "./worker": {
+      "import": "./dist/worker-client.js",
+      "types": "./dist/worker-client.d.ts"
+    },
+    "./render-worker": {
+      "import": "./dist/render-worker.js",
+      "types": "./dist/render-worker.d.ts"
+    },
+    "./wasm-pool": {
+      "import": "./dist/wasm-pool.js",
+      "types": "./dist/wasm-pool.d.ts"
+    },
+    "./wasm-worker": {
+      "import": "./dist/wasm-worker.js",
+      "types": "./dist/wasm-worker.d.ts"
+    },
+    "./wasm": {
+      "import": "./dist/wasm/renderart.js",
+      "types": "./dist/wasm/renderart.d.ts"
+    },
+    "./wasm-threads": {
+      "import": "./dist/wasm-threads/renderart.js",
+      "types": "./dist/wasm-threads/renderart.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "npm run build:wasm && npm run build:ts",
+    "build:all": "npm run build:wasm && npm run build:wasm:threads && npm run build:ts",
+    "build:ts": "tsc",
+    "build:wasm": "RUSTFLAGS=\"-C target-feature=+simd128\" wasm-pack build --release --target web --out-dir dist/wasm && npm run build:wasm:cleanup",
+    "build:wasm:threads": "RUSTFLAGS=\"-C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128 -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=--export=__heap_base -C link-arg=--export=__data_end\" rustup run nightly wasm-pack build --release --target web --out-dir dist/wasm-threads -- --features parallel -Z build-std=panic_abort,std && npm run build:wasm:cleanup",
+    "build:wasm:cleanup": "rm -f dist/wasm/.gitignore dist/wasm/package.json dist/wasm-threads/.gitignore dist/wasm-threads/package.json",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build:all",
+    "test": "cargo test --release && cargo test --release --features parallel"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "wasm-pack": "^0.12.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "sideEffects": false
+}

@@ -1,0 +1,28 @@
+# Rust/WASM source files
+*.rs
+Cargo.toml
+Cargo.lock
+target/
+
+# Development files
+.gitignore
+.git/
+.idea/
+.vscode/
+
+# Test files
+*.test.ts
+*.spec.ts
+__tests__/
+coverage/
+
+# Build tools config
+tsconfig.json
+wasm-pack.lock
+
+# Source TypeScript (compiled JS is in dist/)
+src/
+
+# Other
+*.log
+.DS_Store

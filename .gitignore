@@ -1,0 +1,7 @@
+/target/
+/node_modules/
+/pkg/
+*.log
+.DS_Store
+/src/tools/out/
+/target-threads/

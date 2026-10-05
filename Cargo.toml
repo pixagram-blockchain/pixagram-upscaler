@@ -1,0 +1,44 @@
+[package]
+name = "renderart"
+version = "0.3.6"
+edition = "2021"
+authors = []
+description = "High-performance pixel art rendering engines for WebAssembly"
+license = "MIT"
+repository = ""
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/wasm/lib.rs"
+
+[dependencies]
+wasm-bindgen = "0.2.92"
+bytemuck = "1.24.0"
+# Multi-threading (enabled via the `parallel` feature). These pull in a
+# SharedArrayBuffer-backed thread pool and are only compiled when requested.
+rayon = { version = "1.10", optional = true }
+wasm-bindgen-rayon = { version = "1.2", optional = true }
+
+[features]
+default = []
+# Enable data-parallel rendering across a wasm-bindgen-rayon thread pool.
+# Requires a nightly toolchain, atomics + shared-memory link flags (see the
+# `build:wasm:threads` npm script), a cross-origin-isolated page, and calling
+# the renderers from a Web Worker (the main thread cannot block on atomics).
+# Natively it simply uses rayon's thread pool.
+parallel = ["dep:rayon", "dep:wasm-bindgen-rayon"]
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3.42"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[package.metadata.wasm-pack.profile.release]
+# -O3: -O4 is markedly slower to run and measured no faster here. The feature
+# flags only *allow* what rustc emits (bulk-memory etc. are on by default in
+# current toolchains; threads only in the opt-in threaded build).
+wasm-opt = ["-O3", "--enable-simd", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-sign-ext", "--enable-mutable-globals", "--enable-reference-types", "--enable-multivalue", "--enable-threads"]
