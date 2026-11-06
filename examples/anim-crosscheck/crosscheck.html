@@ -1,0 +1,196 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>FrameDecoder cross-check</title>
+<pre id="log"></pre>
+<script type="module">
+import init, * as wasm from '../../dist/wasm-anim/renderart.js';
+import { WasmAnimation, upscaleFrames, probeAnimation, WasmAnimationPool } from '../../dist/index.js';
+
+const out = { fixtures: [], pool: [], memory: null, errors: [] };
+const log = (s) => { document.getElementById('log').textContent += s + '\n'; };
+
+async function chromeDecode(bytes, type) {
+  const dec = new ImageDecoder({ data: bytes, type, premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+  await dec.tracks.ready;
+  await dec.completed;
+  const track = dec.tracks.selectedTrack;
+  const frames = [];
+  for (let i = 0; i < track.frameCount; i++) {
+    const { image } = await dec.decode({ frameIndex: i });
+    const w = image.displayWidth, h = image.displayHeight;
+    let px = new Uint8ClampedArray(w * h * 4);
+    try {
+      await image.copyTo(px, { format: 'RGBA' });
+    } catch (e) {
+      const c = new OffscreenCanvas(w, h); const g = c.getContext('2d');
+      g.drawImage(image, 0, 0); px = g.getImageData(0, 0, w, h).data;
+    }
+    frames.push({ w, h, px, durationMs: (image.duration ?? 0) / 1000 });
+    image.close();
+  }
+  const rep = track.repetitionCount;
+  dec.close();
+  return { frames, rep };
+}
+
+function compare(a, b) {
+  // RGB compared only where either side is visible; alpha everywhere.
+  let diffPx = 0, maxDiff = 0, firstAt = -1;
+  for (let i = 0; i < a.length; i += 4) {
+    const visible = a[i + 3] > 0 || b[i + 3] > 0;
+    let d = Math.abs(a[i + 3] - b[i + 3]);
+    if (visible) d = Math.max(d, Math.abs(a[i] - b[i]), Math.abs(a[i + 1] - b[i + 1]), Math.abs(a[i + 2] - b[i + 2]));
+    if (d > 0) { diffPx++; if (firstAt < 0) firstAt = i / 4; }
+    if (d > maxDiff) maxDiff = d;
+  }
+  return { diffPx, maxDiff, firstAt };
+}
+
+async function main() {
+  await init();
+  const manifest = await (await fetch('./fixtures/manifest.json')).json();
+
+  // 1) Every composited frame against Chrome's own decoder.
+  for (const { name, note } of manifest) {
+    const bytes = new Uint8Array(await (await fetch('./fixtures/' + name)).arrayBuffer());
+    const type = name.endsWith('.gif') ? 'image/gif' : 'image/webp';
+    const rec = { name, note, probe: probeAnimation(bytes) };
+    try {
+      const ref = await chromeDecode(bytes, type);
+      const anim = WasmAnimation.open(wasm, bytes);
+      rec.ours = { w: anim.width, h: anim.height, frames: anim.frameCount, loops: anim.loopCount, durationMs: anim.durationMs };
+      rec.chrome = { w: ref.frames[0]?.w, h: ref.frames[0]?.h, frames: ref.frames.length, rep: ref.rep };
+      rec.perFrame = [];
+      let i = 0;
+      // Two loops: the second must equal the first (rewind clears the canvas).
+      for (let loop = 0; loop < 2; loop++) {
+        if (loop) anim.rewind();
+        i = 0;
+        while (anim.next()) {
+          const r = ref.frames[i];
+          const v = anim.frameView();
+          const cmp = r && r.w === v.width && r.h === v.height ? compare(v.data, r.px) : { sizeMismatch: true };
+          if (loop === 0) rec.perFrame.push({ i, ...cmp, delay: anim.delay, chromeMs: r?.durationMs });
+          else if (cmp.diffPx !== rec.perFrame[i]?.diffPx) rec.loopMismatch = (rec.loopMismatch || 0) + 1;
+          i++;
+        }
+      }
+      rec.decoded = i;
+      anim.free();
+    } catch (e) {
+      rec.error = String(e && e.message || e);
+    }
+    out.fixtures.push(rec);
+    log(name + ' ' + (rec.error || ('frames ' + rec.decoded + '/' + rec.chrome.frames + ' maxDiff ' + Math.max(...rec.perFrame.map((p) => p.maxDiff ?? 999)))));
+  }
+
+  // 2) One frame of WASM memory, however many frames go through: per effect,
+  // memory after the first rendered frame equals memory after hundreds.
+  {
+    const bytes = new Uint8Array(await (await fetch('./fixtures/gif_opaque_loop.gif')).arrayBuffer());
+    const mem = () => wasm.get_memory().buffer.byteLength;
+    out.memory = {};
+    for (const spec of [{ effect: 'xbrz', options: { scale: 6 } }, { effect: 'crt', options: { scale: 8 } }, { effect: 'hex', options: { scale: 8 } }, { effect: 'none' }]) {
+      const anim = WasmAnimation.open(wasm, bytes);
+      let n = 0, first = 0;
+      const t0 = performance.now();
+      for (const f of upscaleFrames(wasm, anim, spec, { loops: 30 })) { if (n++ === 0) first = mem(); }
+      const ms = (performance.now() - t0) / n;
+      out.memory[spec.effect] = { frames: n, afterFirst: first, afterAll: mem(), grew: mem() - first, msPerFrame: +ms.toFixed(3) };
+      anim.free();
+    }
+    log('memory ' + JSON.stringify(out.memory));
+  }
+
+  // 3) The worker pool: frames stream to the page one at a time.
+  const pool = await WasmAnimationPool.create({ workers: 2 });
+  for (const { name } of manifest) {
+    const bytes = new Uint8Array(await (await fetch('./fixtures/' + name)).arrayBuffer());
+    const rec = { name };
+    try {
+      const direct = WasmAnimation.open(wasm, bytes);
+      const stream = await pool.open(bytes, { effect: 'none' });
+      rec.info = stream.info;
+      let exact = 0, total = 0, looped = 0;
+      const steps = direct.frameCount * 2 + 1;
+      for (let s = 0; s < steps; s++) {
+        const f = await stream.next({ wrap: true, output: 'pixels' });
+        if (!f) break;
+        if (f.looped) { looped++; direct.rewind(); }
+        if (!direct.next()) { direct.rewind(); direct.next(); }
+        const v = direct.frameView();
+        total++;
+        if (f.index === direct.index && f.width === v.width && compare(f.data, v.data).diffPx === 0) exact++;
+      }
+      rec.pixels = { exact, total, looped };
+      // Upscaled bitmaps: drawn back and compared with the direct render.
+      await stream.rewind(); direct.rewind();
+      const spec = { effect: 'xbrz', options: { scale: 3 } };
+      let bmpOk = 0, bmpTotal = 0, bmpMax = 0, costs = 0;
+      for (let s = 0; s < Math.min(6, direct.frameCount); s++) {
+        const f = await stream.next({ render: spec });
+        direct.next();
+        const ref = direct.renderView(spec);
+        const c = new OffscreenCanvas(f.width, f.height); const g = c.getContext('2d');
+        g.drawImage(f.bitmap, 0, 0); f.bitmap.close();
+        const got = g.getImageData(0, 0, f.width, f.height).data;
+        // Bitmaps (and canvases) store premultiplied colour: compare what is
+        // displayed, i.e. premultiplied values.
+        let maxd = 0;
+        for (let i = 0; i < got.length; i += 4) {
+          const a = ref.data[i + 3];
+          maxd = Math.max(maxd, Math.abs(a - got[i + 3]));
+          for (let c = 0; c < 3; c++) {
+            maxd = Math.max(maxd, Math.abs(Math.round(ref.data[i + c] * a / 255) - Math.round(got[i + c] * got[i + 3] / 255)));
+          }
+        }
+        bmpTotal++; costs += f.cost;
+        if (maxd <= 1) bmpOk++;
+        bmpMax = Math.max(bmpMax, maxd);
+      }
+      rec.bitmaps = { ok: bmpOk, total: bmpTotal, maxDiff: bmpMax, avgCostMs: +(costs / bmpTotal).toFixed(2) };
+      // Skip: decode without rendering, then one frame.
+      await stream.rewind(); direct.rewind();
+      const k = Math.min(3, direct.frameCount - 1);
+      const f = await stream.next({ skip: k, output: 'pixels' });
+      direct.skip(k); direct.next();
+      rec.skip = { index: f?.index, expected: direct.index, same: f ? compare(f.data, direct.frameView().data).diffPx === 0 : false };
+      stream.close();
+      direct.free();
+    } catch (e) {
+      rec.error = String(e && e.message || e);
+    }
+    out.pool.push(rec);
+  }
+  {
+    // Closing while a frame is in flight resolves it to null and frees it.
+    const bytes = new Uint8Array(await (await fetch('./fixtures/webp_lossy_alpha.webp')).arrayBuffer());
+    const stream = await pool.open(bytes, { effect: 'crt', options: { scale: 8 } });
+    const p = stream.next();
+    stream.close();
+    out.closeInFlight = { result: await p, streams: pool.streamCount };
+    // Errors: a PNG is refused with a clear message, and the pool survives.
+    try { await pool.open(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10, 0, 0]), { effect: 'none' }); out.badOpen = 'opened?!'; }
+    catch (e) { out.badOpen = String(e.message); }
+    const again = await pool.open(bytes, { effect: 'none' });
+    out.afterError = !!(await again.next());
+    again.close();
+  }
+  pool.dispose();
+  log('done');
+}
+
+function verdict() {
+  const lines = ['', '── summary ──'];
+  for (const f of out.fixtures) {
+    if (f.error) { lines.push('FAIL ' + f.name + ': ' + f.error); continue; }
+    const max = Math.max(0, ...f.perFrame.map((p) => p.sizeMismatch ? 999 : p.maxDiff));
+    const ok = f.decoded === f.chrome.frames && f.ours.w === f.chrome.w && f.ours.h === f.chrome.h && !f.loopMismatch && max <= (f.name.endsWith('.gif') ? 0 : 4);
+    lines.push((ok ? 'ok   ' : 'FAIL ') + f.name + ': ' + f.decoded + ' frames, max channel diff vs Chrome ' + max);
+  }
+  for (const [k, v] of Object.entries(out.memory || {})) lines.push((v.grew === 0 ? 'ok   ' : 'FAIL ') + 'memory ' + k + ': ' + v.frames + ' frames, grew ' + v.grew + ' bytes, ' + v.msPerFrame + ' ms/frame');
+  for (const p of out.pool) lines.push((p.error || p.pixels.exact !== p.pixels.total || p.bitmaps.ok !== p.bitmaps.total || !p.skip.same ? 'FAIL ' : 'ok   ') + 'pool ' + p.name);
+  log(lines.join('\n'));
+}
+main().then(() => { verdict(); window.__RESULT__ = out; }, (e) => { out.errors.push(String(e && e.stack || e)); log(String(e && e.stack || e)); window.__RESULT__ = out; });
+</script>

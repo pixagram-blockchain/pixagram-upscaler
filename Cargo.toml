@@ -1,6 +1,6 @@
 [package]
 name = "renderart"
-version = "0.3.6"
+version = "0.5.0"
 edition = "2021"
 authors = []
 description = "High-performance pixel art rendering engines for WebAssembly"
@@ -14,6 +14,11 @@ path = "src/wasm/lib.rs"
 [dependencies]
 wasm-bindgen = "0.2.92"
 bytemuck = "1.24.0"
+# Animated image sources for FrameDecoder (pure Rust, no unsafe; `anim`
+# feature only). Only the decoders are used: one frame is decoded and
+# composited at a time.
+gif = { version = "0.14", default-features = false, features = ["std"], optional = true }
+image-webp = { version = "0.2.4", optional = true }
 # Multi-threading (enabled via the `parallel` feature). These pull in a
 # SharedArrayBuffer-backed thread pool and are only compiled when requested.
 rayon = { version = "1.10", optional = true }
@@ -27,6 +32,11 @@ default = []
 # the renderers from a Web Worker (the main thread cannot block on atomics).
 # Natively it simply uses rayon's thread pool.
 parallel = ["dep:rayon", "dep:wasm-bindgen-rayon"]
+# FrameDecoder: animated (and still) GIF / WebP decoded one frame at a time,
+# with xBRZ / CRT / hex rendering of the current frame. Built as its own
+# artifact (`dist/wasm-anim`, see `build:wasm:anim`) so the default module
+# keeps its size: the decoders add about 230 KB (80 KB gzipped).
+anim = ["dep:gif", "dep:image-webp"]
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.42"

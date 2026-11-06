@@ -10,6 +10,10 @@
  * page you may pass an `out` array backed by a SharedArrayBuffer; workers then
  * write straight into it and the main thread does no assembly copy.
  *
+ * The worker and the `.wasm` file are referenced with
+ * `new URL('...', import.meta.url)`, so webpack 5 (and other bundlers that
+ * support the pattern) emit both with the bundle.
+ *
  * A worker whose band fails (e.g. its WASM instance trapped) is replaced with
  * a fresh one before the next job, so one bad call never poisons the pool.
  *
@@ -24,9 +28,10 @@ export interface WasmXbrzPoolOptions {
     workers?: number;
     /** URL of `renderart_bg.wasm` (default: the copy shipped next to this file). */
     wasmUrl?: string | URL;
-    /** URL of the wasm-bindgen glue `renderart.js` (default: shipped copy). */
-    glueUrl?: string | URL;
-    /** Create workers yourself (e.g. for a bundler-specific worker URL). */
+    /**
+     * Create workers yourself (e.g. for a bundler-specific worker URL). They must
+     * run `@pixagram/upscaler/wasm-worker`.
+     */
     createWorker?: () => Worker;
     /** Minimum source rows per band (default 16): smaller jobs use fewer workers. */
     minRowsPerBand?: number;
@@ -40,7 +45,6 @@ type PoolInput = ImageData | {
 };
 export declare class WasmXbrzPool {
     private readonly module;
-    private readonly glueUrl;
     private readonly make;
     private readonly minRows;
     private readonly initTimeoutMs;

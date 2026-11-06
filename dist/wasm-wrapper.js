@@ -87,6 +87,41 @@ function clampScale(scale, def, min, max) {
     const s = typeof scale === 'number' && Number.isFinite(scale) ? Math.floor(scale) : def;
     return Math.min(max, Math.max(min, s));
 }
+/** CRT options as WASM arguments: scale 2..32 (default 3) and the defaults. */
+export function crtArgs(options = {}) {
+    return [
+        clampScale(options.scale, 3, 2, 32),
+        options.warpX ?? 0.015,
+        options.warpY ?? 0.02,
+        options.scanHardness ?? -4.0,
+        options.scanOpacity ?? 0.5,
+        options.maskOpacity ?? 0.3,
+        options.enableWarp !== false,
+        options.enableScanlines !== false,
+        options.enableMask !== false,
+    ];
+}
+/** Hex options as WASM arguments: scale 2..32 (default 16) and the defaults. */
+export function hexArgs(options = {}) {
+    return [
+        clampScale(options.scale, 16, 2, 32),
+        orientationToNumber(options.orientation),
+        options.drawBorders ?? false,
+        colorToRgba(options.borderColor, 0x282828ff),
+        options.borderThickness ?? 1,
+        colorToRgba(options.backgroundColor, 0x00000000),
+    ];
+}
+/** xBRZ options as WASM arguments: scale 2..8 (default 2) and the defaults. */
+export function xbrzArgs(options = {}) {
+    return [
+        clampScale(options.scale, 2, 2, 8),
+        options.equalColorTolerance ?? 30,
+        options.centerDirectionBias ?? 4.0,
+        options.dominantDirectionThreshold ?? 3.6,
+        options.steepDirectionThreshold ?? 2.2,
+    ];
+}
 /**
  * High-level WASM renderer wrapper
  *
@@ -98,16 +133,13 @@ export class WasmRenderer {
         this.wasm = wasm;
     }
     crtResult(input, options) {
-        const scale = clampScale(options.scale, 3, 2, 32);
-        return this.wasm.crt_upscale_config(bytesOf(input), input.width, input.height, scale, options.warpX ?? 0.015, options.warpY ?? 0.02, options.scanHardness ?? -4.0, options.scanOpacity ?? 0.5, options.maskOpacity ?? 0.3, options.enableWarp !== false, options.enableScanlines !== false, options.enableMask !== false);
+        return this.wasm.crt_upscale_config(bytesOf(input), input.width, input.height, ...crtArgs(options));
     }
     hexResult(input, options) {
-        const scale = clampScale(options.scale, 16, 2, 32);
-        return this.wasm.hex_upscale_config(bytesOf(input), input.width, input.height, scale, orientationToNumber(options.orientation), options.drawBorders ?? false, colorToRgba(options.borderColor, 0x282828ff), options.borderThickness ?? 1, colorToRgba(options.backgroundColor, 0x00000000));
+        return this.wasm.hex_upscale_config(bytesOf(input), input.width, input.height, ...hexArgs(options));
     }
     xbrzResult(input, options) {
-        const scale = clampScale(options.scale, 2, 2, 8);
-        return this.wasm.xbrz_upscale_config(bytesOf(input), input.width, input.height, scale, options.equalColorTolerance ?? 30, options.centerDirectionBias ?? 4.0, options.dominantDirectionThreshold ?? 3.6, options.steepDirectionThreshold ?? 2.2);
+        return this.wasm.xbrz_upscale_config(bytesOf(input), input.width, input.height, ...xbrzArgs(options));
     }
     /** Render CRT effect (copied; into `out` when given). */
     renderCrt(input, options = {}, out) {

@@ -1,7 +1,7 @@
 {
   "name": "@pixagram/upscaler",
-  "version": "0.4.0",
-  "description": "High-performance pixel art rendering engines with WebGL2 GPU acceleration and SIMD WebAssembly support",
+  "version": "0.5.0",
+  "description": "High-performance pixel art rendering engines with WebGL2 GPU acceleration and SIMD WebAssembly support, including animated GIF/WebP processed one frame at a time",
   "keywords": [
     "pixel-art",
     "upscaling",
@@ -12,7 +12,10 @@
     "wasm",
     "image-processing",
     "retro",
-    "gamedev"
+    "gamedev",
+    "animated-gif",
+    "webp",
+    "animation"
   ],
   "author": "",
   "license": "MIT",
@@ -57,9 +60,29 @@
       "import": "./dist/wasm-worker.js",
       "types": "./dist/wasm-worker.d.ts"
     },
+    "./frames": {
+      "import": "./dist/frames.js",
+      "types": "./dist/frames.d.ts"
+    },
+    "./anim-probe": {
+      "import": "./dist/anim-probe.js",
+      "types": "./dist/anim-probe.d.ts"
+    },
+    "./anim-pool": {
+      "import": "./dist/anim-pool.js",
+      "types": "./dist/anim-pool.d.ts"
+    },
+    "./anim-worker": {
+      "import": "./dist/anim-worker.js",
+      "types": "./dist/anim-worker.d.ts"
+    },
     "./wasm": {
       "import": "./dist/wasm/renderart.js",
       "types": "./dist/wasm/renderart.d.ts"
+    },
+    "./wasm-anim": {
+      "import": "./dist/wasm-anim/renderart.js",
+      "types": "./dist/wasm-anim/renderart.d.ts"
     },
     "./wasm-threads": {
       "import": "./dist/wasm-threads/renderart.js",
@@ -72,15 +95,16 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "npm run build:wasm && npm run build:ts",
-    "build:all": "npm run build:wasm && npm run build:wasm:threads && npm run build:ts",
+    "build": "npm run build:wasm && npm run build:wasm:anim && npm run build:ts",
+    "build:all": "npm run build:wasm && npm run build:wasm:anim && npm run build:wasm:threads && npm run build:ts",
     "build:ts": "tsc",
     "build:wasm": "RUSTFLAGS=\"-C target-feature=+simd128\" wasm-pack build --release --target web --out-dir dist/wasm && npm run build:wasm:cleanup",
+    "build:wasm:anim": "RUSTFLAGS=\"-C target-feature=+simd128\" wasm-pack build --release --target web --out-dir dist/wasm-anim -- --features anim && npm run build:wasm:cleanup",
     "build:wasm:threads": "RUSTFLAGS=\"-C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128 -C link-arg=--shared-memory -C link-arg=--max-memory=1073741824 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C link-arg=--export=__heap_base -C link-arg=--export=__data_end\" rustup run nightly wasm-pack build --release --target web --out-dir dist/wasm-threads -- --features parallel -Z build-std=panic_abort,std && npm run build:wasm:cleanup",
-    "build:wasm:cleanup": "rm -f dist/wasm/.gitignore dist/wasm/package.json dist/wasm-threads/.gitignore dist/wasm-threads/package.json",
+    "build:wasm:cleanup": "rm -f dist/wasm/.gitignore dist/wasm/package.json dist/wasm-anim/.gitignore dist/wasm-anim/package.json dist/wasm-threads/.gitignore dist/wasm-threads/package.json",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build:all",
-    "test": "cargo test --release && cargo test --release --features parallel"
+    "test": "cargo test --release --features anim && cargo test --release --features parallel,anim"
   },
   "devDependencies": {
     "typescript": "^5.3.0",

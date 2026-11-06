@@ -10,6 +10,10 @@
  * page you may pass an `out` array backed by a SharedArrayBuffer; workers then
  * write straight into it and the main thread does no assembly copy.
  *
+ * The worker and the `.wasm` file are referenced with
+ * `new URL('...', import.meta.url)`, so webpack 5 (and other bundlers that
+ * support the pattern) emit both with the bundle.
+ *
  * A worker whose band fails (e.g. its WASM instance trapped) is replaced with
  * a fresh one before the next job, so one bad call never poisons the pool.
  *
@@ -27,9 +31,10 @@ export interface WasmXbrzPoolOptions {
   workers?: number;
   /** URL of `renderart_bg.wasm` (default: the copy shipped next to this file). */
   wasmUrl?: string | URL;
-  /** URL of the wasm-bindgen glue `renderart.js` (default: shipped copy). */
-  glueUrl?: string | URL;
-  /** Create workers yourself (e.g. for a bundler-specific worker URL). */
+  /**
+   * Create workers yourself (e.g. for a bundler-specific worker URL). They must
+   * run `@pixagram/upscaler/wasm-worker`.
+   */
   createWorker?: () => Worker;
   /** Minimum source rows per band (default 16): smaller jobs use fewer workers. */
   minRowsPerBand?: number;
@@ -67,7 +72,6 @@ export class WasmXbrzPool {
 
   private constructor(
     private readonly module: WebAssembly.Module,
-    private readonly glueUrl: string,
     private readonly make: () => Worker,
     private readonly minRows: number,
     private readonly initTimeoutMs: number
@@ -78,14 +82,12 @@ export class WasmXbrzPool {
     const hw = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 2 : 2;
     const count = Math.min(8, Math.max(1, Math.floor(options.workers ?? hw - 1)));
     const wasmUrl = options.wasmUrl ?? new URL('./wasm/renderart_bg.wasm', import.meta.url);
-    const glueUrl = String(options.glueUrl ?? new URL('./wasm/renderart.js', import.meta.url));
     const make =
       options.createWorker ?? (() => new Worker(new URL('./wasm-worker.js', import.meta.url), { type: 'module' }));
 
     const module = await compile(wasmUrl);
     const pool = new WasmXbrzPool(
       module,
-      glueUrl,
       make,
       Math.max(1, options.minRowsPerBand ?? 16),
       options.initTimeoutMs ?? 30000
@@ -147,7 +149,7 @@ export class WasmXbrzPool {
       settle.reject(err);
       this.failSlot(slot, err);
     });
-    worker.postMessage({ type: 'init', module: this.module, glueUrl: this.glueUrl } satisfies WasmPoolRequest);
+    worker.postMessage({ type: 'init', module: this.module } satisfies WasmPoolRequest);
     return slot;
   }
 

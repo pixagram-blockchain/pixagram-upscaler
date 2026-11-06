@@ -9,44 +9,62 @@
  *
  * Build target: a module worker, e.g.
  *   new Worker(new URL('./wasm-worker.js', import.meta.url), { type: 'module' })
+ *
+ * The wasm-bindgen glue is imported statically, so a bundler that builds this
+ * worker includes the glue in the worker chunk. (A runtime `import(url)` made
+ * webpack warn "Critical dependency: the request of a dependency is an
+ * expression" and fail to load the glue.)
  */
 
 import type { WasmPoolRequest, WasmPoolResponse } from './wasm-pool-protocol.js';
 import type { RenderArtWasm } from './wasm-wrapper.js';
+// Generated into dist/wasm by `npm run build:wasm`, next to the compiled
+// worker; it is not part of the TypeScript sources.
+// @ts-ignore: resolved in dist/ (see above)
+import * as glueModule from './wasm/renderart.js';
 
+type Glue = RenderArtWasm &
+  Required<Pick<RenderArtWasm, 'xbrz_upscale_band'>> & {
+    initSync(arg: { module: WebAssembly.Module }): { xbrz_upscale_band?: unknown };
+  };
+
+const glue = glueModule as unknown as Glue;
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
-let wasm: (RenderArtWasm & Required<Pick<RenderArtWasm, 'xbrz_upscale_band'>>) | null = null;
+let initialised = false;
 
-async function init(module: WebAssembly.Module, glueUrl: string): Promise<void> {
-  // The glue path is only known at runtime (bundlers may relocate it).
-  const glue = (await import(/* @vite-ignore */ glueUrl)) as {
-    initSync(arg: { module: WebAssembly.Module }): unknown;
-  } & RenderArtWasm;
-  glue.initSync({ module });
-  if (typeof glue.xbrz_upscale_band !== 'function') {
+function init(module: WebAssembly.Module): void {
+  const exports = glue.initSync({ module });
+  // A module from an older build (custom `wasmUrl`) may lack the band export.
+  if (typeof exports.xbrz_upscale_band !== 'function') {
     throw new Error('WASM module lacks xbrz_upscale_band (rebuild @pixagram/upscaler/wasm)');
   }
-  wasm = glue as typeof wasm;
+  initialised = true;
 }
 
 function reply(msg: WasmPoolResponse, transfer: Transferable[] = []): void {
   ctx.postMessage(msg, transfer);
 }
 
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 ctx.addEventListener('message', (event: MessageEvent<WasmPoolRequest>) => {
   const req = event.data;
   if (req.type === 'init') {
-    init(req.module, req.glueUrl).then(
-      () => reply({ type: 'ready' }),
-      (err: unknown) => reply({ type: 'init-error', error: err instanceof Error ? err.message : String(err) })
-    );
+    try {
+      init(req.module);
+      reply({ type: 'ready' });
+    } catch (err) {
+      reply({ type: 'init-error', error: errorText(err) });
+    }
     return;
   }
   if (req.type !== 'band') return;
   try {
-    if (!wasm) throw new Error('worker not initialised');
-    const r = wasm.xbrz_upscale_band(
+    if (!initialised) throw new Error('worker not initialised');
+    const r = glue.xbrz_upscale_band(
       new Uint8Array(req.window),
       req.width,
       req.height,
@@ -62,7 +80,7 @@ ctx.addEventListener('message', (event: MessageEvent<WasmPoolRequest>) => {
     const ptr = r.ptr;
     const len = r.len;
     r.free?.();
-    const band = new Uint8Array(wasm.get_memory().buffer, ptr, len);
+    const band = new Uint8Array(glue.get_memory().buffer, ptr, len);
     if (req.target) {
       // Shared output: write in place, nothing to transfer back.
       new Uint8Array(req.target, req.targetOffset, len).set(band);
@@ -72,6 +90,6 @@ ctx.addEventListener('message', (event: MessageEvent<WasmPoolRequest>) => {
       reply({ type: 'band', id: req.id, ok: true, buffer: copy.buffer }, [copy.buffer]);
     }
   } catch (err) {
-    reply({ type: 'band', id: req.id, ok: false, error: err instanceof Error ? err.message : String(err) });
+    reply({ type: 'band', id: req.id, ok: false, error: errorText(err) });
   }
 });

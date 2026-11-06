@@ -8,8 +8,6 @@ export type WasmPoolRequest =
       type: 'init';
       /** Compiled once on the main thread and shared with every worker. */
       module: WebAssembly.Module;
-      /** URL of the wasm-bindgen glue (`renderart.js`). */
-      glueUrl: string;
     }
   | {
       type: 'band';

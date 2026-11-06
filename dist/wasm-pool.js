@@ -10,6 +10,10 @@
  * page you may pass an `out` array backed by a SharedArrayBuffer; workers then
  * write straight into it and the main thread does no assembly copy.
  *
+ * The worker and the `.wasm` file are referenced with
+ * `new URL('...', import.meta.url)`, so webpack 5 (and other bundlers that
+ * support the pattern) emit both with the bundle.
+ *
  * A worker whose band fails (e.g. its WASM instance trapped) is replaced with
  * a fresh one before the next job, so one bad call never poisons the pool.
  *
@@ -25,7 +29,6 @@ function sanitizeScale(scale) {
 }
 export class WasmXbrzPool {
     module;
-    glueUrl;
     make;
     minRows;
     initTimeoutMs;
@@ -33,9 +36,8 @@ export class WasmXbrzPool {
     pending = new Map();
     nextId = 1;
     disposed = false;
-    constructor(module, glueUrl, make, minRows, initTimeoutMs) {
+    constructor(module, make, minRows, initTimeoutMs) {
         this.module = module;
-        this.glueUrl = glueUrl;
         this.make = make;
         this.minRows = minRows;
         this.initTimeoutMs = initTimeoutMs;
@@ -45,10 +47,9 @@ export class WasmXbrzPool {
         const hw = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 2 : 2;
         const count = Math.min(8, Math.max(1, Math.floor(options.workers ?? hw - 1)));
         const wasmUrl = options.wasmUrl ?? new URL('./wasm/renderart_bg.wasm', import.meta.url);
-        const glueUrl = String(options.glueUrl ?? new URL('./wasm/renderart.js', import.meta.url));
         const make = options.createWorker ?? (() => new Worker(new URL('./wasm-worker.js', import.meta.url), { type: 'module' }));
         const module = await compile(wasmUrl);
-        const pool = new WasmXbrzPool(module, glueUrl, make, Math.max(1, options.minRowsPerBand ?? 16), options.initTimeoutMs ?? 30000);
+        const pool = new WasmXbrzPool(module, make, Math.max(1, options.minRowsPerBand ?? 16), options.initTimeoutMs ?? 30000);
         for (let i = 0; i < count; i++)
             pool.slots.push(pool.spawn());
         try {
@@ -104,7 +105,7 @@ export class WasmXbrzPool {
             settle.reject(err);
             this.failSlot(slot, err);
         });
-        worker.postMessage({ type: 'init', module: this.module, glueUrl: this.glueUrl });
+        worker.postMessage({ type: 'init', module: this.module });
         return slot;
     }
     /** Rejects every job still waiting on `slot`. */

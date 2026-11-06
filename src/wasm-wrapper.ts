@@ -101,6 +101,13 @@ export interface RenderArtWasm {
   ): WasmUpscaleResult;
 
   /**
+   * Animated (or still) GIF / WebP decoded one composited frame at a time
+   * (0.5.0+, only in the `anim` build: `@pixagram/upscaler/wasm-anim`). See
+   * {@link WasmFrameDecoder} and the `WasmAnimation` wrapper.
+   */
+  FrameDecoder?: new (data: Uint8Array, maxPixels?: number) => WasmFrameDecoder;
+
+  /**
    * xBRZ for source rows [y0, y1) only. `window` holds source rows
    * [window_y0, ...) and must cover [y0 - 2, y1 + 2) clipped to the image.
    * Used by {@link WasmXbrzPool}; bands stack byte-identically.
@@ -118,6 +125,65 @@ export interface RenderArtWasm {
     dominant_direction_threshold: number,
     steep_direction_threshold: number,
   ): WasmUpscaleResult;
+}
+
+/**
+ * The raw `FrameDecoder` class of the WASM module (0.5.0+): one RGBA canvas,
+ * one frame decoded and composited at a time. Prefer the `WasmAnimation`
+ * wrapper, which adds option defaults and zero-copy views.
+ */
+export interface WasmFrameDecoder {
+  /** `"gif"` or `"webp"`. */
+  readonly format: string;
+  readonly width: number;
+  readonly height: number;
+  /** Frames in one loop. */
+  readonly frame_count: number;
+  /** Total plays, 0 = forever. */
+  readonly loop_count: number;
+  /** One loop, in ms (sum of the effective delays). */
+  readonly duration_ms: number;
+  /** More than one frame. */
+  readonly animated: boolean;
+  /** Frame on the canvas, -1 before the first `next_frame()`. */
+  readonly index: number;
+  /** Effective duration of the current frame (under 11 ms plays as 100 ms). */
+  readonly delay_ms: number;
+  /** Declared duration of the current frame. */
+  readonly raw_delay_ms: number;
+  /** A frame failed to decode and the loop was cut short there. */
+  readonly truncated: boolean;
+  next_frame(): boolean;
+  skip_frames(n: number): number;
+  rewind(): void;
+  frame(): WasmUpscaleResult;
+  upscale_xbrz(
+    scale: number,
+    equal_color_tolerance: number,
+    center_direction_bias: number,
+    dominant_direction_threshold: number,
+    steep_direction_threshold: number,
+  ): WasmUpscaleResult;
+  upscale_crt(
+    scale: number,
+    warp_x: number,
+    warp_y: number,
+    scan_hardness: number,
+    scan_opacity: number,
+    mask_opacity: number,
+    enable_warp: boolean,
+    enable_scanlines: boolean,
+    enable_mask: boolean,
+  ): WasmUpscaleResult;
+  upscale_hex(
+    scale: number,
+    orientation: number,
+    draw_borders: boolean,
+    border_color: number,
+    border_thickness: number,
+    background_color: number,
+  ): WasmUpscaleResult;
+  free(): void;
 }
 
 /** Reads the fields of a result and frees the wasm-bindgen wrapper object. */
@@ -200,6 +266,51 @@ function clampScale(scale: number | undefined, def: number, min: number, max: nu
   return Math.min(max, Math.max(min, s));
 }
 
+/** `crt_upscale_config` arguments after `data, width, height` (defaults applied). */
+export type CrtArgs = [number, number, number, number, number, number, boolean, boolean, boolean];
+/** `hex_upscale_config` arguments after `data, width, height` (defaults applied). */
+export type HexArgs = [number, number, boolean, number, number, number];
+/** `xbrz_upscale_config` arguments after `data, width, height` (defaults applied). */
+export type XbrzArgs = [number, number, number, number, number];
+
+/** CRT options as WASM arguments: scale 2..32 (default 3) and the defaults. */
+export function crtArgs(options: CrtOptions = {}): CrtArgs {
+  return [
+    clampScale(options.scale, 3, 2, 32),
+    options.warpX ?? 0.015,
+    options.warpY ?? 0.02,
+    options.scanHardness ?? -4.0,
+    options.scanOpacity ?? 0.5,
+    options.maskOpacity ?? 0.3,
+    options.enableWarp !== false,
+    options.enableScanlines !== false,
+    options.enableMask !== false,
+  ];
+}
+
+/** Hex options as WASM arguments: scale 2..32 (default 16) and the defaults. */
+export function hexArgs(options: HexOptions = {}): HexArgs {
+  return [
+    clampScale(options.scale, 16, 2, 32),
+    orientationToNumber(options.orientation),
+    options.drawBorders ?? false,
+    colorToRgba(options.borderColor, 0x282828ff),
+    options.borderThickness ?? 1,
+    colorToRgba(options.backgroundColor, 0x00000000),
+  ];
+}
+
+/** xBRZ options as WASM arguments: scale 2..8 (default 2) and the defaults. */
+export function xbrzArgs(options: XbrzOptions = {}): XbrzArgs {
+  return [
+    clampScale(options.scale, 2, 2, 8),
+    options.equalColorTolerance ?? 30,
+    options.centerDirectionBias ?? 4.0,
+    options.dominantDirectionThreshold ?? 3.6,
+    options.steepDirectionThreshold ?? 2.2,
+  ];
+}
+
 /**
  * High-level WASM renderer wrapper
  *
@@ -213,50 +324,15 @@ export class WasmRenderer {
   }
 
   private crtResult(input: WasmInput, options: CrtOptions): WasmUpscaleResult {
-    const scale = clampScale(options.scale, 3, 2, 32);
-    return this.wasm.crt_upscale_config(
-      bytesOf(input),
-      input.width,
-      input.height,
-      scale,
-      options.warpX ?? 0.015,
-      options.warpY ?? 0.02,
-      options.scanHardness ?? -4.0,
-      options.scanOpacity ?? 0.5,
-      options.maskOpacity ?? 0.3,
-      options.enableWarp !== false,
-      options.enableScanlines !== false,
-      options.enableMask !== false,
-    );
+    return this.wasm.crt_upscale_config(bytesOf(input), input.width, input.height, ...crtArgs(options));
   }
 
   private hexResult(input: WasmInput, options: HexOptions): WasmUpscaleResult {
-    const scale = clampScale(options.scale, 16, 2, 32);
-    return this.wasm.hex_upscale_config(
-      bytesOf(input),
-      input.width,
-      input.height,
-      scale,
-      orientationToNumber(options.orientation),
-      options.drawBorders ?? false,
-      colorToRgba(options.borderColor, 0x282828ff),
-      options.borderThickness ?? 1,
-      colorToRgba(options.backgroundColor, 0x00000000),
-    );
+    return this.wasm.hex_upscale_config(bytesOf(input), input.width, input.height, ...hexArgs(options));
   }
 
   private xbrzResult(input: WasmInput, options: XbrzOptions): WasmUpscaleResult {
-    const scale = clampScale(options.scale, 2, 2, 8);
-    return this.wasm.xbrz_upscale_config(
-      bytesOf(input),
-      input.width,
-      input.height,
-      scale,
-      options.equalColorTolerance ?? 30,
-      options.centerDirectionBias ?? 4.0,
-      options.dominantDirectionThreshold ?? 3.6,
-      options.steepDirectionThreshold ?? 2.2,
-    );
+    return this.wasm.xbrz_upscale_config(bytesOf(input), input.width, input.height, ...xbrzArgs(options));
   }
 
   /** Render CRT effect (copied; into `out` when given). */

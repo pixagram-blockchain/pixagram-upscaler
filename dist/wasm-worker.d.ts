@@ -9,6 +9,11 @@
  *
  * Build target: a module worker, e.g.
  *   new Worker(new URL('./wasm-worker.js', import.meta.url), { type: 'module' })
+ *
+ * The wasm-bindgen glue is imported statically, so a bundler that builds this
+ * worker includes the glue in the worker chunk. (A runtime `import(url)` made
+ * webpack warn "Critical dependency: the request of a dependency is an
+ * expression" and fail to load the glue.)
  */
 export {};
 //# sourceMappingURL=wasm-worker.d.ts.map

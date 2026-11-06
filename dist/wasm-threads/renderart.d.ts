@@ -117,11 +117,11 @@ export interface InitOutput {
     readonly xbrz_upscale: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly xbrz_upscale_band: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number];
     readonly xbrz_upscale_config: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
-    readonly __wbg_get_upscaleresult_len: (a: number) => number;
-    readonly __wbg_get_upscaleresult_ptr: (a: number) => number;
     readonly __wbg_set_upscaleresult_len: (a: number, b: number) => void;
     readonly __wbg_set_upscaleresult_ptr: (a: number, b: number) => void;
     readonly release_buffers: () => void;
+    readonly __wbg_get_upscaleresult_len: (a: number) => number;
+    readonly __wbg_get_upscaleresult_ptr: (a: number) => number;
     readonly get_memory: () => any;
     readonly __wbg_wbg_rayon_poolbuilder_free: (a: number, b: number) => void;
     readonly initThreadPool: (a: number) => any;

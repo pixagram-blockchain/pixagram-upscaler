@@ -19,6 +19,11 @@ export { getMaxOutputDimension, trimMemory } from './gpu-context.js';
 // WASM (CPU) rendering: single-threaded wrapper and multi-core worker pool
 export { WasmRenderer, readWasmOutput, viewWasmOutput, colorToRgba, orientationToNumber } from './wasm-wrapper.js';
 export { WasmXbrzPool } from './wasm-pool.js';
+export { crtArgs, hexArgs, xbrzArgs } from './wasm-wrapper.js';
+// Animated GIF / WebP: batches of frames in the memory of one frame
+export { probeAnimation, effectiveDelay } from './anim-probe.js';
+export { WasmAnimation, upscaleFrames, upscaleFrameBatch, renderDecoderFrame } from './frames.js';
+export { WasmAnimationPool, AnimationStream } from './anim-pool.js';
 import { CrtGpuRenderer } from './crt-gpu.js';
 import { HexGpuRenderer } from './hex-gpu.js';
 import { XbrzGpuRenderer } from './xbrz-gpu.js';

@@ -12,6 +12,11 @@ All renderers are available in two implementations:
 - **GPU (WebGL2)** - High-performance fragment shader-based rendering
 - **WASM** - Rust-compiled, SIMD-accelerated WebAssembly (no WebGL2 needed)
 
+Animated images:
+- **Animated GIF and WebP** decoded and upscaled **one frame at a time**: a
+  batch of any length runs in the memory of one frame (see
+  [Animated GIF and WebP](#animated-gif-and-webp))
+
 Performance features:
 - **Non-blocking GPU readback** via `renderAsync()` (PBO + fence)
 - **Off-main-thread rendering** via `WorkerRenderer` (OffscreenCanvas in a worker)
@@ -256,6 +261,13 @@ const out = await pool.upscale(imageData, { scale: 4 });
 pool.dispose();
 ```
 
+The worker and the `.wasm` file are referenced with
+`new URL('…', import.meta.url)`, so webpack 5 emits both with your bundle and
+there is nothing to configure. (In 0.4.0 the worker loaded the WASM glue from
+a runtime URL, which webpack reported as "Critical dependency: the request of
+a dependency is an expression" and could not load at runtime; 0.4.1 imports
+it statically.)
+
 It pays off for compute-heavy jobs (large or detailed images at 2x-4x) and
 keeps the main thread free. At 7x-8x the work is dominated by moving the large
 output between threads, so a single-threaded `renderXbrzView` is usually just
@@ -266,6 +278,120 @@ The band primitive is exported too, if you schedule work yourself:
 `xbrz_upscale_band(window, width, height, windowY0, y0, y1, scale, ...)`
 renders source rows `[y0, y1)` from a window of rows covering
 `[y0 - 2, y1 + 2)`.
+
+## Animated GIF and WebP
+
+A batch of frames is processed one frame at a time. The decoder keeps the
+compressed file and **one** RGBA canvas; each step decodes the next frame,
+composites it onto that canvas (disposal and blending as browsers do), and the
+upscaler renders it into the module's single shared output buffer - the same
+buffer every other render call reuses. Nothing is accumulated, so 10 frames or
+10,000 (or an endless loop) cost the same memory: one source frame plus one
+output frame.
+
+The decoder ships in its own build of the module, `@pixagram/upscaler/wasm-anim`
+(about 300 KB, 110 KB gzipped, against 63 KB / 26 KB for `@pixagram/upscaler/wasm`,
+which is unchanged and has no decoder). It includes the upscalers too.
+
+### Off the main thread: `WasmAnimationPool`
+
+The usual way to play an animation. Workers decode and upscale; the page
+receives one `ImageBitmap` per request:
+
+```javascript
+import { WasmAnimationPool } from '@pixagram/upscaler';
+
+const pool = await WasmAnimationPool.create();           // 1 worker by default
+const stream = await pool.open(gifBytes, { effect: 'xbrz', options: { scale: 4 } });
+
+let frame;
+while ((frame = await stream.next({ wrap: true }))) {    // wrap: loop forever
+  canvasCtx.transferFromImageBitmap(frame.bitmap);       // or drawImage + close()
+  await new Promise((r) => setTimeout(r, frame.delay));
+}
+stream.close();
+pool.dispose();
+```
+
+- `stream.next({ render, skip, wrap, output })`: `render` changes the effect or
+  scale for this frame; `skip` decodes frames without rendering them (to catch
+  up after falling behind - frames build on each other, so they are still
+  decoded); `output: 'pixels'` returns RGBA bytes instead of a bitmap.
+- `stream.info`: `format`, `width`, `height`, `frameCount`, `loopCount` (total
+  plays, 0 = forever), `durationMs`, `animated`.
+- Effects: `'xbrz'`, `'crt'`, `'hex'` (same options as the renderers above) or
+  `'none'` (the composited source frame).
+- `stream.close()` frees the worker-side decoder; a frame still in flight
+  resolves to `null` and is closed for you.
+
+### In the current thread: `WasmAnimation` and `upscaleFrames`
+
+```javascript
+import init, * as wasm from '@pixagram/upscaler/wasm-anim';
+import { upscaleFrames, WasmAnimation } from '@pixagram/upscaler';
+
+await init();
+
+// Generator: each frame's data is a zero-copy view, valid until the loop continues.
+for (const f of upscaleFrames(wasm, webpBytes, { effect: 'crt', options: { scale: 6 } })) {
+  ctx.putImageData(new ImageData(f.data, f.width, f.height), 0, 0);
+}
+
+// Step by step.
+const anim = WasmAnimation.open(wasm, gifBytes, { maxPixels: 4 * 1024 * 1024 });
+while (anim.next()) {
+  const src = anim.frameView();                          // composited source frame
+  const out = anim.renderView({ effect: 'hex', options: { scale: 8 } });
+  // anim.index, anim.delay
+}
+anim.rewind();                                           // next loop
+anim.free();
+```
+
+`upscaleFrameBatch(renderer, frames, spec, onFrame)` runs the same loop over
+frames you decode yourself (any iterable or async iterable of RGBA frames),
+with a `WasmRenderer`.
+
+The raw module class is `FrameDecoder` (`next_frame`, `skip_frames`, `rewind`,
+`frame`, `upscale_xbrz`, `upscale_crt`, `upscale_hex`, plus getters).
+
+### Probing without decoding
+
+```javascript
+import { probeAnimation } from '@pixagram/upscaler';
+
+probeAnimation(bytes);
+// { format: 'gif', width, height, frameCount, loopCount, durationMs, animated, needsFrameDecoder }
+// null for anything that is not a GIF / WebP
+```
+
+Header-only (image data is skipped, not decoded), so it is cheap enough for
+layout code. `needsFrameDecoder` is true for every GIF and for WebP files with
+the animation flag, which still-image WebP decoders (libwebp's `WebPDecode`)
+refuse even when they hold a single frame.
+
+### What browsers do, and what this does
+
+Frames match Chrome's own decoder (`ImageDecoder`): bit-exact for GIF; for
+WebP exact against libwebp's animation decoder, and within the rounding of
+Chrome's premultiplied pipeline against Chrome. `examples/anim-crosscheck`
+re-runs that comparison (and the memory and pool checks) in a browser.
+
+- GIF canvas: the logical screen, enlarged to fit the first frame (as
+  Chromium). It starts transparent; the background colour is ignored.
+  "Restore to background" clears to transparent, "restore to previous" puts
+  back what the frame covered. Indices past the colour table are opaque black.
+  Interlaced frames are supported.
+- WebP: the canvas is cleared to transparent at the start of every loop (the
+  ANIM background colour is a hint browsers ignore); blending is libwebp's
+  non-premultiplied "over"; the dispose flag clears the frame rectangle.
+- Durations under 11 ms play as 100 ms (`delay`; the declared value is
+  `raw_delay_ms` on the raw class).
+- Loop counts are total plays: a GIF without a NETSCAPE2.0 block plays once,
+  NETSCAPE `n` plays `n + 1` times, WebP ANIM `n` plays `n` times, 0 = forever.
+- A frame that fails to decode after the first ends the loop at the last good
+  frame (`truncated` becomes true and `frameCount` drops), leaving the canvas
+  as it was. Canvases above `maxPixels` (default 16 MP) are refused.
 
 ## Building from Source
 
@@ -283,7 +409,8 @@ renders source rows `[y0, y1)` from a window of rows covering
 # Install dependencies
 npm install
 
-# WASM (SIMD, single-threaded, stable toolchain) + TypeScript
+# WASM (SIMD, single-threaded, stable toolchain), the animation build
+# (dist/wasm-anim) + TypeScript
 npm run build
 
 # ...plus the optional threaded WASM variant (nightly), as published
@@ -292,6 +419,7 @@ npm run build:all
 # Individual steps
 npm run build:ts
 npm run build:wasm
+npm run build:wasm:anim
 npm run build:wasm:threads
 
 # Rust tests (golden outputs, serial and parallel)
@@ -345,6 +473,7 @@ Measured from a worker with 2 threads (512x512 source): xBRZ 2x 4.2 -> 2.2 ms,
 
 - **GPU Renderers**: Requires WebGL2 (Chrome 56+, Firefox 51+, Safari 15+, Edge 79+)
 - **WASM Module**: Requires WebAssembly (all modern browsers)
+- **WasmXbrzPool / WasmAnimationPool**: module workers (Chrome 80+, Firefox 114+, Safari 15+)
 
 ## Performance
 

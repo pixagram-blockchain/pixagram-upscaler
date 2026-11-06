@@ -18,6 +18,15 @@ export { WasmRenderer, readWasmOutput, viewWasmOutput, colorToRgba, orientationT
 export type { RenderArtWasm, WasmUpscaleResult, WasmDimensions } from './wasm-wrapper.js';
 export { WasmXbrzPool } from './wasm-pool.js';
 export type { WasmXbrzPoolOptions } from './wasm-pool.js';
+export { crtArgs, hexArgs, xbrzArgs } from './wasm-wrapper.js';
+export type { WasmFrameDecoder, CrtArgs, HexArgs, XbrzArgs } from './wasm-wrapper.js';
+export { probeAnimation, effectiveDelay } from './anim-probe.js';
+export type { AnimationInfo } from './anim-probe.js';
+export { WasmAnimation, upscaleFrames, upscaleFrameBatch, renderDecoderFrame } from './frames.js';
+export type { FrameEffect, FrameRenderSpec, RenderedFrame, WasmAnimationOpenOptions, UpscaleFramesOptions, } from './frames.js';
+export { WasmAnimationPool, AnimationStream } from './anim-pool.js';
+export type { WasmAnimationPoolOptions, AnimationOpenOptions, NextFrameOptions, AnimationFrame, AnimationStreamInfo, } from './anim-pool.js';
+export type { FrameOutputKind } from './anim-protocol.js';
 import { CrtGpuRenderer } from './crt-gpu.js';
 import { HexGpuRenderer } from './hex-gpu.js';
 import { XbrzGpuRenderer } from './xbrz-gpu.js';

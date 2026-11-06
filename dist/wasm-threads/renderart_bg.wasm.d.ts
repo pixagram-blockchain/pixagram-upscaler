@@ -18,11 +18,11 @@ export const hex_upscale_config: (a: number, b: number, c: number, d: number, e:
 export const xbrz_upscale: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
 export const xbrz_upscale_band: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number];
 export const xbrz_upscale_config: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number];
-export const __wbg_get_upscaleresult_len: (a: number) => number;
-export const __wbg_get_upscaleresult_ptr: (a: number) => number;
 export const __wbg_set_upscaleresult_len: (a: number, b: number) => void;
 export const __wbg_set_upscaleresult_ptr: (a: number, b: number) => void;
 export const release_buffers: () => void;
+export const __wbg_get_upscaleresult_len: (a: number) => number;
+export const __wbg_get_upscaleresult_ptr: (a: number) => number;
 export const get_memory: () => any;
 export const __wbg_wbg_rayon_poolbuilder_free: (a: number, b: number) => void;
 export const initThreadPool: (a: number) => any;

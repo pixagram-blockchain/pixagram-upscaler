@@ -12,6 +12,8 @@
 use std::cell::RefCell;
 use wasm_bindgen::prelude::*;
 
+#[cfg(feature = "anim")]
+mod anim;
 mod crt;
 mod hex;
 mod xbrz;
@@ -423,6 +425,237 @@ pub fn xbrz_upscale_band(
         )
         .map_err(scratch_error)
     })
+}
+
+// ============================================================================
+// Animated images: a batch of frames in the memory of one
+// ============================================================================
+//
+// Only in builds with the `anim` feature (`dist/wasm-anim`).
+
+/// An animated (or still) GIF or WebP, decoded one composited frame at a time.
+///
+/// The decoder keeps the compressed file and exactly one RGBA canvas the size
+/// of the image. [`FrameDecoder::next_frame`] decodes the next frame and
+/// composites it onto that canvas (disposal and blending as browsers do), so
+/// an animation of any length never holds more than one frame. The
+/// `upscale_*` methods render the current frame straight from the canvas into
+/// the module's shared output buffer - the same single buffer every other
+/// render call reuses - so a whole batch of frames is upscaled in the memory
+/// of one output frame:
+///
+/// ```js
+/// const dec = new FrameDecoder(gifBytes);
+/// while (dec.next_frame()) {
+///   const r = dec.upscale_xbrz(4, 30, 4, 3.6, 2.2);
+///   // r.ptr / r.len in get_memory().buffer: valid until the next render call.
+///   consume(new Uint8ClampedArray(get_memory().buffer, r.ptr, r.len), r.width, r.height, dec.delay_ms);
+///   r.free();
+/// }
+/// dec.free();
+/// ```
+///
+/// `next_frame` returns `false` at the end of a loop; `rewind` starts the
+/// next one. Frames are not random-access: they depend on their predecessors.
+#[cfg(feature = "anim")]
+#[wasm_bindgen]
+pub struct FrameDecoder {
+    anim: anim::Animation,
+}
+
+#[cfg(feature = "anim")]
+fn anim_error(e: anim::AnimError) -> JsError {
+    JsError::new(&e.0)
+}
+
+#[cfg(feature = "anim")]
+#[wasm_bindgen]
+impl FrameDecoder {
+    /// Parses `data` (GIF87a/89a or RIFF WebP, animated or still; copied into
+    /// the module) and allocates the canvas. No frame is decoded yet.
+    /// Canvases over `max_pixels` (default 16 MP) are refused.
+    #[wasm_bindgen(constructor)]
+    pub fn new(data: Vec<u8>, max_pixels: Option<u32>) -> Result<FrameDecoder, JsError> {
+        let limit = max_pixels.map_or(anim::DEFAULT_MAX_PIXELS, |p| p as u64);
+        anim::Animation::open(data, limit)
+            .map(|anim| FrameDecoder { anim })
+            .map_err(anim_error)
+    }
+
+    /// `"gif"` or `"webp"`.
+    #[wasm_bindgen(getter)]
+    pub fn format(&self) -> String {
+        self.anim.format().as_str().to_string()
+    }
+
+    /// Canvas width in pixels.
+    #[wasm_bindgen(getter)]
+    pub fn width(&self) -> u32 {
+        self.anim.width()
+    }
+
+    /// Canvas height in pixels.
+    #[wasm_bindgen(getter)]
+    pub fn height(&self) -> u32 {
+        self.anim.height()
+    }
+
+    /// Frames in one loop (from the headers; lowered if a frame turns out to
+    /// be undecodable, see `truncated`).
+    #[wasm_bindgen(getter)]
+    pub fn frame_count(&self) -> u32 {
+        self.anim.frame_count()
+    }
+
+    /// Total number of plays; 0 = loop forever.
+    #[wasm_bindgen(getter)]
+    pub fn loop_count(&self) -> u32 {
+        self.anim.loop_count()
+    }
+
+    /// Duration of one loop in milliseconds (sum of the effective delays).
+    #[wasm_bindgen(getter)]
+    pub fn duration_ms(&self) -> f64 {
+        self.anim.duration_ms() as f64
+    }
+
+    /// True when the image has more than one frame.
+    #[wasm_bindgen(getter)]
+    pub fn animated(&self) -> bool {
+        self.anim.is_animated()
+    }
+
+    /// Index of the frame on the canvas, or -1 before the first `next_frame`.
+    #[wasm_bindgen(getter)]
+    pub fn index(&self) -> i32 {
+        self.anim.index().map_or(-1, |i| i as i32)
+    }
+
+    /// How long browsers show the current frame, in milliseconds (declared
+    /// durations under 11 ms play as 100 ms).
+    #[wasm_bindgen(getter)]
+    pub fn delay_ms(&self) -> u32 {
+        self.anim.delay_ms()
+    }
+
+    /// The current frame's declared duration, in milliseconds.
+    #[wasm_bindgen(getter)]
+    pub fn raw_delay_ms(&self) -> u32 {
+        self.anim.raw_delay_ms()
+    }
+
+    /// True once a frame failed to decode and the loop was cut short there.
+    #[wasm_bindgen(getter)]
+    pub fn truncated(&self) -> bool {
+        self.anim.is_truncated()
+    }
+
+    /// Decodes the next frame onto the canvas. `false` (canvas unchanged) at
+    /// the end of the loop. Throws only if the first frame cannot be decoded.
+    pub fn next_frame(&mut self) -> Result<bool, JsError> {
+        self.anim.next_frame().map_err(anim_error)
+    }
+
+    /// Advances `n` frames without rendering them (each is still composited:
+    /// frames build on each other). Returns how many were advanced.
+    pub fn skip_frames(&mut self, n: u32) -> Result<u32, JsError> {
+        self.anim.skip_frames(n).map_err(anim_error)
+    }
+
+    /// Back to the start of the animation: transparent canvas, frame 0 next.
+    pub fn rewind(&mut self) -> Result<(), JsError> {
+        self.anim.rewind().map_err(anim_error)
+    }
+
+    /// Zero-copy view of the current frame (`width x height` RGBA, not
+    /// premultiplied) in `get_memory().buffer`. Valid until the next
+    /// `next_frame` / `rewind` / `free`, or a memory growth.
+    pub fn frame(&self) -> UpscaleResult {
+        let c = self.anim.canvas();
+        UpscaleResult {
+            ptr: c.as_ptr() as u32,
+            len: c.len() as u32,
+            width: self.anim.width(),
+            height: self.anim.height(),
+        }
+    }
+
+    /// xBRZ upscale of the current frame into the shared output buffer
+    /// (see `xbrz_upscale_config`).
+    pub fn upscale_xbrz(
+        &self,
+        scale: u32,
+        equal_color_tolerance: f64,
+        center_direction_bias: f64,
+        dominant_direction_threshold: f64,
+        steep_direction_threshold: f64,
+    ) -> Result<UpscaleResult, JsError> {
+        xbrz_upscale_config(
+            self.anim.canvas(),
+            self.anim.width(),
+            self.anim.height(),
+            scale,
+            equal_color_tolerance,
+            center_direction_bias,
+            dominant_direction_threshold,
+            steep_direction_threshold,
+        )
+    }
+
+    /// CRT effect on the current frame into the shared output buffer
+    /// (see `crt_upscale_config`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn upscale_crt(
+        &self,
+        scale: u32,
+        warp_x: f32,
+        warp_y: f32,
+        scan_hardness: f32,
+        scan_opacity: f32,
+        mask_opacity: f32,
+        enable_warp: bool,
+        enable_scanlines: bool,
+        enable_mask: bool,
+    ) -> Result<UpscaleResult, JsError> {
+        crt_upscale_config(
+            self.anim.canvas(),
+            self.anim.width(),
+            self.anim.height(),
+            scale,
+            warp_x,
+            warp_y,
+            scan_hardness,
+            scan_opacity,
+            mask_opacity,
+            enable_warp,
+            enable_scanlines,
+            enable_mask,
+        )
+    }
+
+    /// Hexagonal effect on the current frame into the shared output buffer
+    /// (see `hex_upscale_config`).
+    pub fn upscale_hex(
+        &self,
+        scale: u32,
+        orientation: u32,
+        draw_borders: bool,
+        border_color: u32,
+        border_thickness: u32,
+        background_color: u32,
+    ) -> Result<UpscaleResult, JsError> {
+        hex_upscale_config(
+            self.anim.canvas(),
+            self.anim.width(),
+            self.anim.height(),
+            scale,
+            orientation,
+            draw_borders,
+            border_color,
+            border_thickness,
+            background_color,
+        )
+    }
 }
 
 // ============================================================================
