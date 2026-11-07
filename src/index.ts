@@ -17,6 +17,9 @@ export type {
   HexOptions,
   HexOrientation,
   XbrzOptions,
+  DepixelizeInput,
+  DepixelizeMode,
+  DepixelizeOptions,
 } from './types.js';
 
 // CRT Renderer
@@ -64,6 +67,11 @@ export type {
   AnimationStreamInfo,
 } from './anim-pool.js';
 export type { FrameOutputKind } from './anim-protocol.js';
+
+// Depixelize: pixel art to resolution-independent SVG, off the main thread
+// (the single-threaded API is `@pixagram/upscaler/depixelize`)
+export { WasmDepixelizePool } from './depixelize-pool.js';
+export type { WasmDepixelizePoolOptions } from './depixelize-pool.js';
 
 import { CrtGpuRenderer } from './crt-gpu.js';
 import { HexGpuRenderer } from './hex-gpu.js';

@@ -1,0 +1,315 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Depixelize — browser demo</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 24px; max-width: 1100px; }
+  h1 { margin: 0 0 4px; font-size: 20px; }
+  p.sub { margin: 0 0 20px; opacity: .7; }
+  .drop {
+    border: 2px dashed currentColor; padding: 24px; text-align: center;
+    border-radius: 8px; cursor: pointer; opacity: .6;
+  }
+  .drop.hover { opacity: 1; }
+  .panes {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 20px;
+  }
+  .pane { border: 1px solid #8884; padding: 12px; border-radius: 6px; min-height: 200px; }
+  .pane h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; opacity: .75; }
+  .pane .stage { display: flex; align-items: center; justify-content: center; min-height: 260px; overflow: auto; }
+  canvas, .pane svg { max-width: 100%; max-height: 420px; image-rendering: pixelated; }
+  .pane svg { image-rendering: auto; }
+  .controls { display: flex; gap: 16px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+  .controls label { display: flex; gap: 6px; align-items: center; }
+  .controls input[type=range] { width: 140px; }
+  .stat { font-family: ui-monospace, monospace; opacity: .7; font-size: 12px; }
+  button, select { font: inherit; padding: 6px 12px; border-radius: 4px; border: 1px solid #8884; cursor: pointer; background: transparent; color: inherit; }
+  select option { background: Canvas; color: CanvasText; }
+  #bench { margin-top: 12px; font-size: 13px; }
+  #bench table { border-collapse: collapse; }
+  #bench th, #bench td { padding: 4px 14px 4px 0; text-align: left; }
+  #bench th { font-weight: 600; opacity: .7; border-bottom: 1px solid #8884; }
+  #bench td.n { font-family: ui-monospace, monospace; text-align: right; }
+  .ok { color: #2a8a3a; } .bad { color: #c03030; }
+</style>
+</head>
+<body>
+<h1>Depixelize — browser demo</h1>
+<p class="sub">Drop a small pixel-art PNG (or click to select). Resolution-independent SVG appears on the right. Transparent PNGs keep their transparency.</p>
+
+<div class="drop" id="drop">Drop a PNG here, or click to pick a file.</div>
+<input type="file" id="file" accept="image/*" style="display:none">
+
+<div class="controls">
+  <label>engine <select id="engine"><option value="js">JavaScript</option></select></label>
+  <label>sample
+    <select id="sample">
+      <option value="mushroom">mushroom 14×14</option>
+      <option value="sheet">sprite sheet 128×128</option>
+      <option value="photo">noisy gradient 96×96</option>
+    </select>
+  </label>
+  <button id="benchBtn" title="Time every engine on the current image and check that their SVGs are identical">Benchmark engines</button>
+</div>
+<div class="controls">
+  <label>mode
+    <select id="mode">
+      <option value="auto">auto (crisp bands, smooth gradients)</option>
+      <option value="shape">shape (classic pixel art)</option>
+      <option value="cell">cell (photos / gradients)</option>
+    </select>
+  </label>
+  <label>scale <input type="range" id="scale" min="4" max="60" value="30"></label>
+  <label title="Decimals of the SVG coordinates (pixel units). auto = coarsest grid within ¼ output pixel">precision
+    <select id="prec">
+      <option value="auto">auto</option>
+      <option value="0">0</option><option value="1">1</option><option value="2">2</option>
+      <option value="3">3</option><option value="4">4</option>
+    </select>
+  </label>
+  <label>iterations <input type="range" id="iter" min="0" max="40" value="20"></label>
+  <label>guesses <input type="range" id="guess" min="1" max="40" value="20"></label>
+  <label>offset <input type="range" id="off" min="1" max="20" value="5"></label>
+  <label title="Blur radius of the colour interpolation inside multi-colour regions (0 = flat cells)">shading <input type="range" id="shade" min="0" max="150" value="70"></label>
+  <label title="Curve smoothing. paper: the paper's random relaxation. fast: deterministic pattern search on the same energy (f32; one f32x4 per visit in the SIMD build), about as smooth for a fraction of the time. off: control points stay on the pixel lattice.">smooth
+    <select id="smooth">
+      <option value="paper">paper (random)</option>
+      <option value="fast">fast (pattern search)</option>
+      <option value="off">off</option>
+    </select>
+  </label>
+  <button id="run">Re-run</button>
+  <button id="dl">Download SVG</button>
+  <span class="stat" id="stat"></span>
+</div>
+<div id="bench"></div>
+
+<div class="panes">
+  <div class="pane">
+    <h3>Input (nearest-neighbor upscale)</h3>
+    <div class="stage"><canvas id="inCv"></canvas></div>
+  </div>
+  <div class="pane">
+    <h3>Depixelized (SVG)</h3>
+    <div class="stage" id="outStage"></div>
+  </div>
+</div>
+
+<!-- depixelize.js: the JavaScript engine. depixelize-wasm.inline.js: the
+     Rust/WebAssembly engines (SIMD + scalar) embedded in a classic script, so
+     this page also works when opened straight from disk (file://). In an app,
+     prefer pkg/depixelize-wasm.mjs, which loads the .wasm files directly. -->
+<script src="depixelize.js"></script>
+<script src="pkg/depixelize-wasm.inline.js"></script>
+<script>
+let currentImageData = null, currentSvg = '';
+const $ = (id) => document.getElementById(id);
+
+// ---- engines ---------------------------------------------------------------
+const engines = { js: { label: 'JavaScript', run: (img, o) => depixelize(img, o) } };
+let wasmNote = '';
+async function loadEngines() {
+  if (typeof DepixelizeWasm === 'undefined') { wasmNote = 'WASM engine not found (pkg/depixelize-wasm.inline.js)'; return; }
+  try {
+    if (DepixelizeWasm.simdSupported()) {
+      const e = await DepixelizeWasm.load(undefined, { simd: true });
+      engines.simd = { label: 'WASM · SIMD', run: e.depixelize };
+    }
+    const s = await DepixelizeWasm.load(undefined, { simd: false });
+    engines.scalar = { label: 'WASM · scalar', run: s.depixelize };
+  } catch (err) {
+    wasmNote = 'WASM engine unavailable: ' + err.message;
+    console.warn(err);
+  }
+  const sel = $('engine');
+  sel.innerHTML = '';
+  for (const k of ['simd', 'scalar', 'js']) {
+    if (engines[k]) sel.add(new Option(engines[k].label, k));
+  }
+  sel.value = engines.simd ? 'simd' : engines.scalar ? 'scalar' : 'js';
+}
+
+function currentOpts() {
+  const modeRaw = $('mode').value;
+  const opts = {
+    scale:       +$('scale').value,
+    iterations:  +$('iter').value,
+    guesses:     +$('guess').value,
+    guessOffset: +$('off').value / 100,
+    shading:     +$('shade').value / 100,
+    smooth:      { paper: true, fast: 'fast', off: false }[$('smooth').value],
+    precision:   $('prec').value === 'auto' ? 'auto' : +$('prec').value,
+  };
+  if (modeRaw !== 'auto') opts.mode = modeRaw;
+  return opts;
+}
+
+function run() {
+  $('guess').disabled = $('smooth').value !== 'paper';     // fast mode has no random guesses
+  if (!currentImageData) return;
+  const eng = engines[$('engine').value] || engines.js;
+  const t0 = performance.now();
+  currentSvg = eng.run(currentImageData, currentOpts());
+  const ms = performance.now() - t0;
+  $('outStage').innerHTML = currentSvg;
+  $('stat').textContent =
+    `${currentImageData.width}×${currentImageData.height}px → ${(currentSvg.length / 1024).toFixed(1)} KB SVG in ` +
+    `${ms < 10 ? ms.toFixed(1) : ms.toFixed(0)} ms · ${eng.label} · smooth ${$('smooth').value}` + (wasmNote ? ` · ${wasmNote}` : '');
+}
+
+// ---- benchmark: every engine on the current image, outputs compared ---------
+async function benchmark() {
+  if (!currentImageData) return;
+  const btn = $('benchBtn'), out = $('bench');
+  btn.disabled = true;
+  const opts = currentOpts(), rows = [];
+  let ref = null;
+  const order = ['js', 'scalar', 'simd'].filter((k) => engines[k]);
+  for (const k of order) {
+    const eng = engines[k];
+    out.textContent = `timing ${eng.label}…`;
+    await new Promise((r) => setTimeout(r, 30));
+    const svg = eng.run(currentImageData, opts);            // warm-up (compiles hot paths)
+    if (k === 'js') ref = svg;
+    const times = [];
+    const tEnd = performance.now() + 1500;
+    while (times.length < 3 || (times.length < 25 && performance.now() < tEnd)) {
+      const t0 = performance.now();
+      eng.run(currentImageData, opts);
+      times.push(performance.now() - t0);
+      if (times.length % 3 === 0) await new Promise((r) => setTimeout(r, 0));
+    }
+    times.sort((a, b) => a - b);
+    rows.push({ eng, med: times[times.length >> 1], runs: times.length, same: ref === null ? null : svg === ref, size: svg.length });
+  }
+  const js = rows.find((r) => r.eng === engines.js);
+  const fmt = (ms) => (ms < 10 ? ms.toFixed(2) : ms.toFixed(1)) + ' ms';
+  const verdict = (r) => r.eng === engines.js ? 'reference'
+    : r.same ? '<span class="ok">✓ byte-identical</span>' : '<span class="bad">✗ differs</span>';
+  out.innerHTML = `<table><tr><th>engine</th><th>median</th><th>runs</th><th>vs JS</th><th>size</th><th>SVG</th></tr>` +
+    rows.map((r) => `<tr><td>${r.eng.label}</td><td class="n">${fmt(r.med)}</td><td class="n">${r.runs}</td>` +
+      `<td class="n">${(js.med / r.med).toFixed(1)}×</td><td class="n">${(r.size / 1024).toFixed(1)} KB</td>` +
+      `<td>${verdict(r)}</td></tr>`).join('') +
+    `</table>`;
+  btn.disabled = false;
+}
+
+// ---- input -----------------------------------------------------------------
+function show(imageData) {
+  currentImageData = imageData;
+  const { width: w, height: h } = imageData;
+  const src = document.createElement('canvas');
+  src.width = w; src.height = h;
+  src.getContext('2d').putImageData(imageData, 0, 0);
+  const inCv = $('inCv');
+  const S = Math.max(1, Math.min(16, Math.floor(1024 / Math.max(w, h))));
+  inCv.width = w * S; inCv.height = h * S;
+  const ictx = inCv.getContext('2d');
+  ictx.imageSmoothingEnabled = false;
+  ictx.drawImage(src, 0, 0, inCv.width, inCv.height);
+  $('bench').textContent = '';
+  run();
+}
+
+function loadFile(file) {
+  const img = new Image();
+  img.onload = () => {
+    const cv = document.createElement('canvas');
+    cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    show(ctx.getImageData(0, 0, cv.width, cv.height));
+  };
+  img.src = URL.createObjectURL(file);
+}
+
+// Built-in samples, so the page isn't empty and the engines can be compared
+// on something big enough to time.
+const MUSHROOM = [
+  '....KKKKKK....',
+  '..KKRRRRRRKK..',
+  '.KRRWWRRRWWRK.',
+  '.KRWWWRRWWWRK.',
+  'KRRWWRRRRWWRRK',
+  'KRRRRRRRRRRRRK',
+  'KRWWWRRRRWWWRK',
+  '.KWWWRRRRWWWK.',
+  '..KKSSSSSSKK..',
+  '..KSSSSSSSSK..',
+  '..KSKKSSKKSK..',
+  '..KSKSSSSKSK..',
+  '..KSSSSSSSSK..',
+  '...KKKKKKKK...',
+];
+function samples(name) {
+  if (name === 'mushroom') {
+    const pal = { K: [20, 20, 20], R: [220, 40, 40], W: [250, 250, 250], S: [250, 200, 160], '.': [255, 255, 255] };
+    const w = 14, h = 14, data = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const [r, g, b] = pal[MUSHROOM[y][x]], i = (y * w + x) * 4;
+      data[i] = r; data[i + 1] = g; data[i + 2] = b; data[i + 3] = 255;
+    }
+    return new ImageData(data, w, h);
+  }
+  if (name === 'sheet') {
+    // 9×9 mushrooms with varied cap / stem colours on a light background.
+    const n = 128, data = new Uint8ClampedArray(n * n * 4).fill(255);
+    let k = 0;
+    for (let ty = 0; ty < 9; ty++) for (let tx = 0; tx < 9; tx++, k++) {
+      const cap = [[220, 40, 40], [40, 120, 220], [60, 170, 70], [230, 160, 30], [150, 60, 190]][k % 5];
+      const stem = [[250, 200, 160], [235, 225, 200], [210, 180, 140]][k % 3];
+      const pal = { K: [20, 20, 20], R: cap, W: [250, 250, 250], S: stem, '.': [244, 240, 232] };
+      for (let y = 0; y < 14; y++) for (let x = 0; x < 14; x++) {
+        const X = tx * 14 + x + 1, Y = ty * 14 + y + 1;
+        if (X >= n || Y >= n) continue;
+        const [r, g, b] = pal[MUSHROOM[y][x]], i = (Y * n + X) * 4;
+        data[i] = r; data[i + 1] = g; data[i + 2] = b;
+      }
+    }
+    return new ImageData(data, n, n);
+  }
+  // Noisy smooth gradient: the worst case for the region / shading stages.
+  const n = 96, data = new Uint8ClampedArray(n * n * 4);
+  let s = 7; const rnd = () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+    const i = (y * n + x) * 4, t = Math.sin(x / 9) * Math.cos(y / 7);
+    data[i] = 120 + 90 * t + (rnd() - .5) * 30;
+    data[i + 1] = 110 + 60 * Math.sin(y / 11) + (rnd() - .5) * 30;
+    data[i + 2] = 140 - 70 * t + (rnd() - .5) * 30;
+    data[i + 3] = 255;
+  }
+  return new ImageData(data, n, n);
+}
+
+// ---- wiring ----------------------------------------------------------------
+const drop = $('drop'), fileInput = $('file');
+drop.addEventListener('click', () => fileInput.click());
+drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('hover'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('hover'));
+drop.addEventListener('drop', (e) => {
+  e.preventDefault(); drop.classList.remove('hover');
+  if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', (e) => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+
+$('run').addEventListener('click', run);
+$('benchBtn').addEventListener('click', benchmark);
+$('sample').addEventListener('change', () => show(samples($('sample').value)));
+for (const id of ['engine', 'mode', 'scale', 'prec', 'iter', 'guess', 'off', 'shade', 'smooth']) {
+  $(id).addEventListener('change', run);
+}
+$('dl').addEventListener('click', () => {
+  if (!currentSvg) return;
+  const blob = new Blob([currentSvg], { type: 'image/svg+xml' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'depixelized.svg';
+  a.click();
+});
+
+$('stat').textContent = 'loading engines…';
+loadEngines().then(() => show(samples('mushroom')));
+</script>
+</body>
+</html>
