@@ -1,0 +1,28 @@
+[package]
+name = "depixelize"
+version = "4.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Resolution-independent vectorization of pixel art (Kopf & Lischinski 2011); byte-identical output to depixelize.js, built for WebAssembly"
+readme = "README.md"
+keywords = ["pixel-art", "vectorization", "svg", "wasm", "depixelize"]
+categories = ["graphics", "multimedia::images", "wasm"]
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Native command-line tool, used for tests and benchmarks (not built for wasm).
+[[bin]]
+name = "depixelize-cli"
+path = "src/bin/cli.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = false
+strip = true
+
+[profile.bench]
+inherits = "release"

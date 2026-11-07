@@ -6,7 +6,7 @@
  *
  * @packageDocumentation
  */
-export type { ImageInput, ImageOutput, RenderSource, Renderer, CrtOptions, HexOptions, HexOrientation, XbrzOptions, } from './types.js';
+export type { ImageInput, ImageOutput, RenderSource, Renderer, CrtOptions, HexOptions, HexOrientation, XbrzOptions, DepixelizeInput, DepixelizeMode, DepixelizeOptions, } from './types.js';
 export { CrtGpuRenderer, CRT_PRESETS } from './crt-gpu.js';
 export { HexGpuRenderer, HEX_PRESETS, hexGetDimensions } from './hex-gpu.js';
 export { XbrzGpuRenderer, XBRZ_PRESETS } from './xbrz-gpu.js';
@@ -27,6 +27,8 @@ export type { FrameEffect, FrameRenderSpec, RenderedFrame, WasmAnimationOpenOpti
 export { WasmAnimationPool, AnimationStream } from './anim-pool.js';
 export type { WasmAnimationPoolOptions, AnimationOpenOptions, NextFrameOptions, AnimationFrame, AnimationStreamInfo, } from './anim-pool.js';
 export type { FrameOutputKind } from './anim-protocol.js';
+export { WasmDepixelizePool } from './depixelize-pool.js';
+export type { WasmDepixelizePoolOptions } from './depixelize-pool.js';
 import { CrtGpuRenderer } from './crt-gpu.js';
 import { HexGpuRenderer } from './hex-gpu.js';
 import { XbrzGpuRenderer } from './xbrz-gpu.js';

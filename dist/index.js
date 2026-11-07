@@ -24,6 +24,9 @@ export { crtArgs, hexArgs, xbrzArgs } from './wasm-wrapper.js';
 export { probeAnimation, effectiveDelay } from './anim-probe.js';
 export { WasmAnimation, upscaleFrames, upscaleFrameBatch, renderDecoderFrame } from './frames.js';
 export { WasmAnimationPool, AnimationStream } from './anim-pool.js';
+// Depixelize: pixel art to resolution-independent SVG, off the main thread
+// (the single-threaded API is `@pixagram/upscaler/depixelize`)
+export { WasmDepixelizePool } from './depixelize-pool.js';
 import { CrtGpuRenderer } from './crt-gpu.js';
 import { HexGpuRenderer } from './hex-gpu.js';
 import { XbrzGpuRenderer } from './xbrz-gpu.js';

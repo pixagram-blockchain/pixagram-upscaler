@@ -98,3 +98,59 @@ export interface XbrzOptions {
   /** Steep direction threshold (default: 2.2) */
   steepDirectionThreshold?: number;
 }
+
+/**
+ * Input of the depixelize vectorizer: `ImageData` or any `{ width, height,
+ * data }` with RGBA (or RGB: `data.length` of `width * height * 3`) bytes,
+ * row-major.
+ */
+export interface DepixelizeInput {
+  /** Image width in pixels */
+  width: number;
+  /** Image height in pixels */
+  height: number;
+  /** RGBA or RGB pixel data */
+  data: Uint8ClampedArray | Uint8Array | ArrayLike<number>;
+}
+
+/** How depixelize groups pixels into regions. */
+export type DepixelizeMode = 'auto' | 'cell' | 'shape';
+
+/**
+ * Depixelize options (pixel art to SVG, Kopf & Lischinski 2011). Same
+ * meaning and defaults as `@pixagram/upscaler/depixelize` and depixelize.js.
+ */
+export interface DepixelizeOptions {
+  /** Output size: SVG width/height = image size x scale (default 40). Geometry is in pixel units (viewBox). */
+  scale?: number;
+  /**
+   * Decimals of the coordinates, in pixel units (0-6). 'auto' (default) picks
+   * the coarsest grid keeping every point within 1/4 output pixel at `scale`
+   * (2 decimals at scale 40, 1 at scale 4).
+   */
+  precision?: number | 'auto';
+  /**
+   * Region grouping (default 'auto'): 'cell' = similar pixels, as in the paper
+   * (colour varies smoothly inside a region); 'shape' = identical pixels
+   * (every colour boundary becomes a curve); 'auto' = decided per region.
+   */
+  mode?: DepixelizeMode;
+  /**
+   * Curve smoothing (default true): true = the paper's random relaxation;
+   * 'fast' = deterministic pattern search on the same energy, about as
+   * smooth in a fraction of the time; false = off.
+   */
+  smooth?: boolean | 'fast';
+  /** Relaxation sweeps (default 20; the maximum in fast mode). */
+  iterations?: number;
+  /** Random candidates per control point per sweep (default 20; unused in fast mode). */
+  guesses?: number;
+  /** Maximum displacement of one candidate, in pixels (default 0.05; fast mode starts at 2x this). */
+  guessOffset?: number;
+  /** Sigma in pixels of the colour interpolation inside multi-colour regions; 0 = flat (default 0.7). */
+  shading?: number;
+  /** PRNG seed; the output is deterministic (default 1). */
+  seed?: number;
+  /** Prefix for the ids inside the SVG (default: a hash of image + options). */
+  idPrefix?: string;
+}

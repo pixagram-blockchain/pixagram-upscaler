@@ -17,6 +17,12 @@ Animated images:
   batch of any length runs in the memory of one frame (see
   [Animated GIF and WebP](#animated-gif-and-webp))
 
+Vector output:
+- **Depixelize** - pixel art to a resolution-independent SVG (Kopf &
+  Lischinski, *Depixelizing Pixel Art*), in WebAssembly (SIMD or scalar
+  build), in the current thread or in a worker pool (see
+  [Depixelize: pixel art to SVG](#depixelize-pixel-art-to-svg))
+
 Performance features:
 - **Non-blocking GPU readback** via `renderAsync()` (PBO + fence)
 - **Off-main-thread rendering** via `WorkerRenderer` (OffscreenCanvas in a worker)
@@ -393,6 +399,91 @@ re-runs that comparison (and the memory and pool checks) in a browser.
   frame (`truncated` becomes true and `frameCount` drops), leaving the canvas
   as it was. Canvases above `maxPixels` (default 16 MP) are refused.
 
+## Depixelize: pixel art to SVG
+
+`@pixagram/upscaler/depixelize` vectorizes pixel art: it implements Kopf &
+Lischinski, *Depixelizing Pixel Art* (SIGGRAPH 2011) - a similarity graph of
+the pixels, reshaped pixel cells, and quadratic B-spline boundaries whose
+control points are optimised for smoothness. The upscalers above produce a
+bigger bitmap; depixelize produces an SVG that renders sharply at any size.
+
+It is a separate WebAssembly module written in Rust (the `depixelize/` folder
+of this repository), in a SIMD (`simd128`) and a scalar build; `init()` picks
+the SIMD build when the browser supports it. Both builds produce
+byte-identical SVG, also identical to the JavaScript reference implementation
+`depixelize/depixelize.js`.
+
+```javascript
+import { init, depixelize } from '@pixagram/upscaler/depixelize';
+
+await init();                                            // depixelize-simd.wasm, or depixelize.wasm
+const svg = depixelize(imageData, { scale: 30 });        // SVG document (string)
+const quick = depixelize(imageData, { scale: 30, smooth: 'fast' });
+
+img.src = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+```
+
+The input is an `ImageData` or any `{ width, height, data }` with RGBA (or
+RGB) bytes. The SVG's `viewBox` is the image size in pixels; its `width` and
+`height` are the image size times `scale`.
+
+### Off the main thread: `WasmDepixelizePool`
+
+A 256x256 image takes about 0.13 s in the SIMD build (0.03 s with
+`smooth: 'fast'`), so large images are best converted in a worker. The pool
+compiles the module once and runs it in module workers:
+
+```javascript
+import { WasmDepixelizePool } from '@pixagram/upscaler';
+
+const pool = await WasmDepixelizePool.create();          // 1 worker by default
+const svg = await pool.depixelize(imageData, { scale: 30, smooth: 'fast' });
+const bytes = await pool.depixelizeBytes(imageData);     // UTF-8 bytes, transferred from the worker
+pool.dispose();
+```
+
+- `create({ workers, simd, wasmUrl, createWorker, initTimeoutMs })`: up to 8
+  workers (each converts one image at a time, so more only help with several
+  images in flight); `simd: false` forces the scalar build; `pool.simd` tells
+  which build runs.
+- Like the other pools it works on any page (no `SharedArrayBuffer`, no
+  COOP/COEP), and the worker and both `.wasm` builds are referenced with
+  `new URL('…', import.meta.url)`, so webpack 5 emits them with your bundle.
+  Only the build in use is downloaded.
+- Invalid images reject with a `RangeError`. A worker whose instance traps
+  (out of memory on a huge image) is replaced before the next request.
+
+### Depixelize options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `scale` | 40 | Output size: SVG `width`/`height` = image size x scale |
+| `precision` | `'auto'` | Decimals of the coordinates, in pixels (0-6). `'auto'`: the coarsest grid that keeps every point within 1/4 output pixel |
+| `mode` | `'auto'` | `'cell'`: regions of similar pixels, as in the paper (colour varies smoothly inside). `'shape'`: regions of identical pixels (every colour boundary is a curve). `'auto'`: per region; banded shading stays crisp, gradients and dither are smoothed |
+| `smooth` | `true` | Curve smoothing. `true`: the paper's random relaxation. `'fast'`: a deterministic pattern search on the same energy, about as smooth with 6-13x less smoothing time. `false`: off |
+| `iterations` | 20 | Relaxation sweeps (the maximum in fast mode) |
+| `guesses` | 20 | Random candidates per control point per sweep (paper mode) |
+| `guessOffset` | 0.05 | Maximum displacement of one candidate, in pixels |
+| `shading` | 0.7 | Sigma, in pixels, of the colour interpolation inside multi-colour regions; 0 = flat cells |
+| `seed` | 1 | PRNG seed; the output is deterministic |
+| `idPrefix` | hash | Prefix for the ids inside the SVG |
+
+### More
+
+- `load()` returns an independent engine. `depixelizeBytes()` returns the SVG
+  as UTF-8 bytes, `depixelizeView()` as a zero-copy view of WASM memory, and
+  `input(width, height)` a view of the module's pixel buffer to fill in place.
+  Types: `@pixagram/upscaler/depixelize` ships its own declarations; the
+  package root exports `DepixelizeOptions` and `DepixelizeInput`.
+- In Node, `await init()` reads the `.wasm` next to the module.
+- `dist/depixelize/depixelize-wasm.inline.js` is a classic `<script>` with
+  both builds embedded (`await DepixelizeWasm.init()`), for pages without a
+  bundler or opened from disk.
+- `examples/depixelize-demo.html` is the browser demo in one file: open it
+  from disk, drop a PNG, compare the engines.
+- Algorithm, output format, fast smoothing and the byte-identity guarantees:
+  [`depixelize/README.md`](depixelize/README.md).
+
 ## Building from Source
 
 ### Prerequisites
@@ -402,6 +493,10 @@ re-runs that comparison (and the memory and pool checks) in a browser.
 - wasm-pack (and binaryen's `wasm-opt`; wasm-pack downloads it)
 - For the optional multi-threaded build only: a **nightly** Rust toolchain plus
   the `rust-src` component (`rustup component add rust-src --toolchain nightly`).
+- For depixelize: Rust 1.85 or newer, and binaryen's `wasm-opt` (version 121
+  or newer) on `PATH` or given as `WASM_OPT=/path/to/wasm-opt`. Without it the
+  modules are built but not post-optimised (the SIMD build runs about 20%
+  slower).
 
 ### Build
 
@@ -410,7 +505,7 @@ re-runs that comparison (and the memory and pool checks) in a browser.
 npm install
 
 # WASM (SIMD, single-threaded, stable toolchain), the animation build
-# (dist/wasm-anim) + TypeScript
+# (dist/wasm-anim), depixelize (dist/depixelize) + TypeScript
 npm run build
 
 # ...plus the optional threaded WASM variant (nightly), as published
@@ -421,9 +516,14 @@ npm run build:ts
 npm run build:wasm
 npm run build:wasm:anim
 npm run build:wasm:threads
+npm run build:depixelize   # also regenerates examples/depixelize-demo.html
 
-# Rust tests (golden outputs, serial and parallel)
+# Rust tests (golden outputs, serial and parallel; depixelize goldens)
 npm test
+
+# depixelize: golden tests, then depixelize.js against both WebAssembly
+# builds, byte for byte
+npm run test:depixelize
 ```
 
 ## Multi-threading with `wasm-bindgen-rayon` (optional)
@@ -473,7 +573,11 @@ Measured from a worker with 2 threads (512x512 source): xBRZ 2x 4.2 -> 2.2 ms,
 
 - **GPU Renderers**: Requires WebGL2 (Chrome 56+, Firefox 51+, Safari 15+, Edge 79+)
 - **WASM Module**: Requires WebAssembly (all modern browsers)
-- **WasmXbrzPool / WasmAnimationPool**: module workers (Chrome 80+, Firefox 114+, Safari 15+)
+- **Depixelize**: SIMD build in Chrome / Edge 91+, Firefox 89+, Safari 16.4+
+  and Node 16.4+; the scalar build everywhere else (chosen automatically). The
+  inline `<script>` bundle needs `DecompressionStream` (Chrome 80+, Firefox
+  113+, Safari 16.4+).
+- **WasmXbrzPool / WasmAnimationPool / WasmDepixelizePool**: module workers (Chrome 80+, Firefox 114+, Safari 15+)
 
 ## Performance
 
@@ -499,6 +603,24 @@ Render time only (output left in WASM memory), Node 22 / V8, one thread,
 At 8x a flat image renders within ~10% of the time it takes to `fill` the
 same 16.8 MB, so output memory bandwidth, not the algorithm, is now the limit.
 See `OPTIMIZATIONS.md` for how this was achieved and verified.
+
+### Depixelize on WASM
+
+Median ms per image, `{ scale: 30 }`, Node 22 / V8 on a 2.7 GHz Xeon, one
+thread (`node depixelize/bench/bench.mjs`). For each `smooth` setting the
+three engines produce the same SVG:
+
+| Image | `smooth` | depixelize.js | WASM scalar | WASM SIMD |
+|-------|----------|---------------|-------------|-----------|
+| Sprite sheet 128x128 | `true` | 143 | 63 | 31.5 |
+| | `'fast'` | 27.3 | 10.4 | 7.8 |
+| Noisy photo 96x96 | `true` | 127 | 58 | 29.2 |
+| | `'fast'` | 39.2 | 15.2 | 10.4 |
+| Sprite sheet 256x256 | `true` | 606 | 252 | 129 |
+| | `'fast'` | 104 | 36 | 28.3 |
+
+The module's memory grows to about 320 bytes per input pixel (21 MB at
+256x256) and is reused by later calls.
 
 ### Optimization notes
 
